@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::error::{AdapterError, Result};
 
 /// Main adapter configuration
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Homarr API URL
     #[serde(default = "default_homarr_url")]

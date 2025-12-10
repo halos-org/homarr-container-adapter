@@ -10,6 +10,7 @@ repository = "https://github.com/hatlabs/homarr-container-adapter"
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
 
 # HTTP client for Homarr API
 reqwest = { version = "0.12", features = ["json", "cookies"] }

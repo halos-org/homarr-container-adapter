@@ -3,12 +3,24 @@ Description=Homarr Container Adapter
 Documentation=https://github.com/hatlabs/homarr-container-adapter
 After=network.target docker.service
 Wants=docker.service
+# Wait for Homarr to be ready (it needs a moment to start)
+After=homarr-container.service
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/bin/homarr-container-adapter setup
-ExecStartPost=/usr/bin/homarr-container-adapter sync
+Type=simple
+ExecStart=/usr/bin/homarr-container-adapter watch
+Restart=on-failure
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/homarr-container-adapter
+PrivateTmp=true
+
+# Allow access to Docker socket
+SupplementaryGroups=docker
 
 [Install]
 WantedBy=multi-user.target
