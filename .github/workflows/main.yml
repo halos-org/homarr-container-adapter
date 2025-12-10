@@ -1,0 +1,16 @@
+name: Main Branch CI/CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-release:
+    uses: hatlabs/shared-workflows/.github/workflows/build-release.yml@main
+    with:
+      package-name: homarr-container-adapter
+      package-description: 'Homarr dashboard adapter for HaLOS - first-boot setup and container auto-discovery'
+      apt-distro: trixie
+      apt-component: main
+    secrets:
+      APT_REPO_PAT: ${{ secrets.APT_REPO_PAT }}
