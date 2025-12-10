@@ -122,8 +122,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let state_path = temp_dir.path().join("state.json");
 
-        let mut state = State::default();
-        state.first_boot_completed = true;
+        let mut state = State {
+            first_boot_completed: true,
+            ..Default::default()
+        };
         state.mark_removed("app1");
         state.mark_removed("app2");
         state.update_sync_time();
