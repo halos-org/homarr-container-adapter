@@ -1,0 +1,8 @@
+homarr-container-adapter (0.1.0) unstable; urgency=medium
+
+  * Initial release
+  * First-boot setup: onboarding, user creation, board setup
+  * Container discovery via homarr.* labels
+  * State persistence for sync tracking
+
+ -- Hat Labs Ltd <info@hatlabs.fi>  Tue, 10 Dec 2024 22:00:00 +0200

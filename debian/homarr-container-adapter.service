@@ -1,0 +1,14 @@
+[Unit]
+Description=Homarr Container Adapter
+Documentation=https://github.com/hatlabs/homarr-container-adapter
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/homarr-container-adapter setup
+ExecStartPost=/usr/bin/homarr-container-adapter sync
+
+[Install]
+WantedBy=multi-user.target

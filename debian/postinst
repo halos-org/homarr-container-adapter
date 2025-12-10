@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create state directory with proper permissions
+        mkdir -p /var/lib/homarr-container-adapter
+        chmod 700 /var/lib/homarr-container-adapter
+
+        # Enable and start the service
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+            systemctl enable homarr-container-adapter.service
+            # Don't start immediately - let it run on next boot or manual trigger
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

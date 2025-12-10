@@ -1,0 +1,47 @@
+[package]
+name = "homarr-container-adapter"
+version = "0.1.0"
+edition = "2021"
+authors = ["Hat Labs Ltd <info@hatlabs.fi>"]
+description = "Adapter for Homarr dashboard: first-boot setup and container auto-discovery"
+license = "MIT"
+repository = "https://github.com/hatlabs/homarr-container-adapter"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for Homarr API
+reqwest = { version = "0.12", features = ["json", "cookies"] }
+
+# Docker API client
+bollard = "0.18"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# URL encoding
+urlencoding = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[bin]]
+name = "homarr-container-adapter"
+path = "src/main.rs"

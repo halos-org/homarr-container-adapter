@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    purge)
+        rm -rf /var/lib/homarr-container-adapter
+        rm -rf /etc/homarr-container-adapter
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

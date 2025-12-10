@@ -1,0 +1,20 @@
+Source: homarr-container-adapter
+Section: admin
+Priority: optional
+Maintainer: Hat Labs Ltd <info@hatlabs.fi>
+Build-Depends: debhelper-compat (= 13), cargo, rustc, libssl-dev, pkg-config
+Standards-Version: 4.6.0
+Homepage: https://github.com/hatlabs/homarr-container-adapter
+
+Package: homarr-container-adapter
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, homarr-branding-halos
+Description: Homarr dashboard adapter for HaLOS
+ Adapter service that handles first-boot setup and container
+ auto-discovery for the Homarr dashboard.
+ .
+ Features:
+  - Completes Homarr onboarding with HaLOS branding
+  - Creates admin user and default dashboard
+  - Auto-discovers Docker containers with homarr.* labels
+  - Syncs discovered apps to the Homarr dashboard

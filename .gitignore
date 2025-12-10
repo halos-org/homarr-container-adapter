@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Debian build artifacts
+*.deb
+*.buildinfo
+*.changes
+debian/.debhelper/
+debian/homarr-container-adapter/

@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export CARGO_HOME = $(CURDIR)/debian/cargo
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release
+
+override_dh_auto_install:
+	install -D -m 755 target/release/homarr-container-adapter \
+		debian/homarr-container-adapter/usr/bin/homarr-container-adapter
+	install -D -m 644 debian/homarr-container-adapter.service \
+		debian/homarr-container-adapter/lib/systemd/system/homarr-container-adapter.service
+	install -d debian/homarr-container-adapter/etc/homarr-container-adapter
+	install -d debian/homarr-container-adapter/var/lib/homarr-container-adapter
+
+override_dh_auto_clean:
+	cargo clean || true
+	rm -rf $(CARGO_HOME)
+
+override_dh_auto_test:
+	# Skip tests during package build
