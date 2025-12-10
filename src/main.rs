@@ -26,7 +26,11 @@ use crate::error::Result;
 #[command(version)]
 struct Cli {
     /// Config file path
-    #[arg(short, long, default_value = "/etc/homarr-container-adapter/config.toml")]
+    #[arg(
+        short,
+        long,
+        default_value = "/etc/homarr-container-adapter/config.toml"
+    )]
     config: String,
 
     /// Enable debug logging
@@ -221,7 +225,9 @@ async fn run_sync(config: &Config) -> Result<()> {
 
     // Add new apps
     for app in &discovered {
-        if !state.discovered_apps.contains_key(&app.container_id) && !state.is_removed(&app.container_id) {
+        if !state.discovered_apps.contains_key(&app.container_id)
+            && !state.is_removed(&app.container_id)
+        {
             match client.add_discovered_app(app, &branding.board.name).await {
                 Ok(_) => {
                     state.discovered_apps.insert(
@@ -284,7 +290,12 @@ async fn check_status(config: &Config) -> Result<()> {
         println!("Last sync: {:?}", state.last_sync);
         println!("Discovered apps: {}", state.discovered_apps.len());
         for (id, app) in &state.discovered_apps {
-            println!("  - {} ({}) [{}]", app.name, app.url, &id[..12.min(id.len())]);
+            println!(
+                "  - {} ({}) [{}]",
+                app.name,
+                app.url,
+                &id[..12.min(id.len())]
+            );
         }
     } else {
         println!("Status: First-boot setup pending");

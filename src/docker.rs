@@ -1,8 +1,8 @@
 //! Docker container discovery and event monitoring
 
-use bollard::Docker;
 use bollard::container::{InspectContainerOptions, ListContainersOptions};
 use bollard::system::EventsOptions;
+use bollard::Docker;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -24,8 +24,9 @@ pub struct DiscoveredApp {
 
 /// Discover apps from Docker containers with homarr.* labels
 pub async fn discover_apps(config: &Config) -> Result<Vec<DiscoveredApp>> {
-    let docker = Docker::connect_with_socket(&config.docker_socket, 120, bollard::API_DEFAULT_VERSION)
-        .map_err(|e| AdapterError::Docker(format!("Failed to connect to Docker: {}", e)))?;
+    let docker =
+        Docker::connect_with_socket(&config.docker_socket, 120, bollard::API_DEFAULT_VERSION)
+            .map_err(|e| AdapterError::Docker(format!("Failed to connect to Docker: {}", e)))?;
 
     let options = ListContainersOptions::<String> {
         all: false, // Only running containers
@@ -56,7 +57,10 @@ pub async fn discover_apps(config: &Config) -> Result<Vec<DiscoveredApp>> {
 }
 
 /// Parse homarr.* labels from a container
-fn parse_homarr_labels(container_id: &str, labels: &HashMap<String, String>) -> Option<DiscoveredApp> {
+fn parse_homarr_labels(
+    container_id: &str,
+    labels: &HashMap<String, String>,
+) -> Option<DiscoveredApp> {
     // Required labels
     let name = labels.get("homarr.name")?;
     let url = labels.get("homarr.url")?;
@@ -92,9 +96,13 @@ pub enum ContainerEvent {
 }
 
 /// Get app info from a specific container by ID
-pub async fn get_container_app(config: &Config, container_id: &str) -> Result<Option<DiscoveredApp>> {
-    let docker = Docker::connect_with_socket(&config.docker_socket, 120, bollard::API_DEFAULT_VERSION)
-        .map_err(|e| AdapterError::Docker(format!("Failed to connect to Docker: {}", e)))?;
+pub async fn get_container_app(
+    config: &Config,
+    container_id: &str,
+) -> Result<Option<DiscoveredApp>> {
+    let docker =
+        Docker::connect_with_socket(&config.docker_socket, 120, bollard::API_DEFAULT_VERSION)
+            .map_err(|e| AdapterError::Docker(format!("Failed to connect to Docker: {}", e)))?;
 
     let container = docker
         .inspect_container(container_id, None::<InspectContainerOptions>)
@@ -113,13 +121,17 @@ pub async fn get_container_app(config: &Config, container_id: &str) -> Result<Op
 
 /// Watch Docker events and send container start/stop events
 pub async fn watch_events(config: &Config, tx: mpsc::Sender<ContainerEvent>) -> Result<()> {
-    let docker = Docker::connect_with_socket(&config.docker_socket, 120, bollard::API_DEFAULT_VERSION)
-        .map_err(|e| AdapterError::Docker(format!("Failed to connect to Docker: {}", e)))?;
+    let docker =
+        Docker::connect_with_socket(&config.docker_socket, 120, bollard::API_DEFAULT_VERSION)
+            .map_err(|e| AdapterError::Docker(format!("Failed to connect to Docker: {}", e)))?;
 
     // Filter for container events only
     let mut filters = HashMap::new();
     filters.insert("type".to_string(), vec!["container".to_string()]);
-    filters.insert("event".to_string(), vec!["start".to_string(), "stop".to_string(), "die".to_string()]);
+    filters.insert(
+        "event".to_string(),
+        vec!["start".to_string(), "stop".to_string(), "die".to_string()],
+    );
 
     let options = EventsOptions {
         filters,
@@ -133,7 +145,8 @@ pub async fn watch_events(config: &Config, tx: mpsc::Sender<ContainerEvent>) -> 
         match event_result {
             Ok(event) => {
                 let action = event.action.as_deref().unwrap_or("");
-                let container_id = event.actor
+                let container_id = event
+                    .actor
                     .as_ref()
                     .and_then(|a| a.id.as_ref())
                     .map(|s| s.as_str())
@@ -143,14 +156,21 @@ pub async fn watch_events(config: &Config, tx: mpsc::Sender<ContainerEvent>) -> 
                     continue;
                 }
 
-                tracing::debug!("Docker event: {} for container {}", action, &container_id[..12.min(container_id.len())]);
+                tracing::debug!(
+                    "Docker event: {} for container {}",
+                    action,
+                    &container_id[..12.min(container_id.len())]
+                );
 
                 match action {
                     "start" => {
                         // Container started - check if it has homarr labels
                         match get_container_app(config, container_id).await {
                             Ok(Some(app)) => {
-                                tracing::info!("Container started with homarr labels: {}", app.name);
+                                tracing::info!(
+                                    "Container started with homarr labels: {}",
+                                    app.name
+                                );
                                 if tx.send(ContainerEvent::Started(app)).await.is_err() {
                                     tracing::error!("Failed to send event - channel closed");
                                     break;
@@ -160,13 +180,21 @@ pub async fn watch_events(config: &Config, tx: mpsc::Sender<ContainerEvent>) -> 
                                 // Container doesn't have homarr labels, ignore
                             }
                             Err(e) => {
-                                tracing::warn!("Failed to inspect container {}: {}", container_id, e);
+                                tracing::warn!(
+                                    "Failed to inspect container {}: {}",
+                                    container_id,
+                                    e
+                                );
                             }
                         }
                     }
                     "stop" | "die" => {
                         // Container stopped
-                        if tx.send(ContainerEvent::Stopped(container_id.to_string())).await.is_err() {
+                        if tx
+                            .send(ContainerEvent::Stopped(container_id.to_string()))
+                            .await
+                            .is_err()
+                        {
                             tracing::error!("Failed to send event - channel closed");
                             break;
                         }

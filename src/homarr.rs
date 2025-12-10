@@ -1,6 +1,6 @@
 //! Homarr API client
 
-use reqwest::{Client, cookie::Jar};
+use reqwest::{cookie::Jar, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -101,7 +101,8 @@ impl HomarrClient {
     /// Get current onboarding step
     pub async fn get_onboarding_step(&self) -> Result<OnboardingStep> {
         let url = format!("{}/api/trpc/onboard.currentStep", self.base_url);
-        let response: TrpcResponse<OnboardingStep> = self.client.get(&url).send().await?.json().await?;
+        let response: TrpcResponse<OnboardingStep> =
+            self.client.get(&url).send().await?.json().await?;
         Ok(response.result.data.json)
     }
 
@@ -241,7 +242,8 @@ impl HomarrClient {
         self.set_home_board(&board_id).await?;
 
         // Set color scheme
-        self.set_color_scheme(&branding.theme.default_color_scheme).await?;
+        self.set_color_scheme(&branding.theme.default_color_scheme)
+            .await?;
 
         Ok(())
     }
@@ -320,8 +322,16 @@ impl HomarrClient {
         // Get current board state
         let board = self.get_board_by_name(&branding.board.name).await?;
 
-        let section_id = board.sections.first().map(|s| s.id.clone()).unwrap_or_default();
-        let layout_id = board.layouts.first().map(|l| l.id.clone()).unwrap_or_default();
+        let section_id = board
+            .sections
+            .first()
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        let layout_id = board
+            .layouts
+            .first()
+            .map(|l| l.id.clone())
+            .unwrap_or_default();
 
         let cockpit = &branding.board.cockpit;
 
@@ -378,7 +388,11 @@ impl HomarrClient {
     }
 
     /// Add a discovered app to Homarr
-    pub async fn add_discovered_app(&self, app: &DiscoveredApp, board_name: &str) -> Result<String> {
+    pub async fn add_discovered_app(
+        &self,
+        app: &DiscoveredApp,
+        board_name: &str,
+    ) -> Result<String> {
         // Create the app in Homarr
         let url = format!("{}/api/trpc/app.create", self.base_url);
         let payload = json!({
@@ -405,7 +419,8 @@ impl HomarrClient {
         let app_id = app_response.result.data.json.app_id;
 
         // Add to board
-        self.add_discovered_app_to_board(&app_id, app, board_name).await?;
+        self.add_discovered_app_to_board(&app_id, app, board_name)
+            .await?;
 
         tracing::info!("Added app '{}' to Homarr (app_id: {})", app.name, app_id);
         Ok(app_id)
@@ -421,8 +436,16 @@ impl HomarrClient {
         // Get current board state
         let board = self.get_board_by_name(board_name).await?;
 
-        let section_id = board.sections.first().map(|s| s.id.clone()).unwrap_or_default();
-        let layout_id = board.layouts.first().map(|l| l.id.clone()).unwrap_or_default();
+        let section_id = board
+            .sections
+            .first()
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        let layout_id = board
+            .layouts
+            .first()
+            .map(|l| l.id.clone())
+            .unwrap_or_default();
 
         // Get existing items to find next available position
         let board_items = self.get_board_items(board_name).await.unwrap_or_default();
