@@ -556,3 +556,119 @@ impl HomarrClient {
         (0, max_y)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn create_test_client() -> HomarrClient {
+        HomarrClient::new("http://localhost:7575").unwrap()
+    }
+
+    #[test]
+    fn test_find_next_position_empty_board() {
+        let client = create_test_client();
+        let items: Vec<serde_json::Value> = vec![];
+        let (x, y) = client.find_next_position(&items, 10);
+        assert_eq!((x, y), (0, 0));
+    }
+
+    #[test]
+    fn test_find_next_position_single_item() {
+        let client = create_test_client();
+        let items = vec![json!({
+            "layouts": [{
+                "xOffset": 0,
+                "yOffset": 0,
+                "width": 1,
+                "height": 1
+            }]
+        })];
+        let (x, y) = client.find_next_position(&items, 10);
+        // Should place next to the existing item
+        assert_eq!((x, y), (1, 0));
+    }
+
+    #[test]
+    fn test_find_next_position_full_row() {
+        let client = create_test_client();
+        // Fill all 10 columns in row 0
+        let items: Vec<serde_json::Value> = (0..10)
+            .map(|i| {
+                json!({
+                    "layouts": [{
+                        "xOffset": i,
+                        "yOffset": 0,
+                        "width": 1,
+                        "height": 1
+                    }]
+                })
+            })
+            .collect();
+        let (x, y) = client.find_next_position(&items, 10);
+        // Should start a new row
+        assert_eq!((x, y), (0, 1));
+    }
+
+    #[test]
+    fn test_find_next_position_with_gap() {
+        let client = create_test_client();
+        // Items at positions 0 and 2, leaving gap at 1
+        let items = vec![
+            json!({
+                "layouts": [{
+                    "xOffset": 0,
+                    "yOffset": 0,
+                    "width": 1,
+                    "height": 1
+                }]
+            }),
+            json!({
+                "layouts": [{
+                    "xOffset": 2,
+                    "yOffset": 0,
+                    "width": 1,
+                    "height": 1
+                }]
+            }),
+        ];
+        let (x, y) = client.find_next_position(&items, 10);
+        // Should fill the gap at position 1
+        assert_eq!((x, y), (1, 0));
+    }
+
+    #[test]
+    fn test_find_next_position_wide_item() {
+        let client = create_test_client();
+        // Wide item taking columns 0-2
+        let items = vec![json!({
+            "layouts": [{
+                "xOffset": 0,
+                "yOffset": 0,
+                "width": 3,
+                "height": 1
+            }]
+        })];
+        let (x, y) = client.find_next_position(&items, 10);
+        // Should place at column 3
+        assert_eq!((x, y), (3, 0));
+    }
+
+    #[test]
+    fn test_find_next_position_tall_item() {
+        let client = create_test_client();
+        // Tall item at position 0
+        let items = vec![json!({
+            "layouts": [{
+                "xOffset": 0,
+                "yOffset": 0,
+                "width": 1,
+                "height": 3
+            }]
+        })];
+        let (x, y) = client.find_next_position(&items, 10);
+        // Should place in the same row but different column
+        assert_eq!((x, y), (1, 2));
+    }
+}

@@ -213,3 +213,94 @@ pub async fn watch_events(config: &Config, tx: mpsc::Sender<ContainerEvent>) -> 
     tracing::warn!("Docker event stream ended");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_labels(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_parse_homarr_labels_all_fields() {
+        let labels = make_labels(&[
+            ("homarr.name", "My App"),
+            ("homarr.url", "http://localhost:8080"),
+            ("homarr.description", "Test application"),
+            ("homarr.icon", "https://example.com/icon.png"),
+            ("homarr.category", "Development"),
+            ("com.docker.compose.service", "myapp"),
+        ]);
+
+        let app = parse_homarr_labels("abc123def456", &labels).unwrap();
+        assert_eq!(app.name, "My App");
+        assert_eq!(app.url, "http://localhost:8080");
+        assert_eq!(app.description, Some("Test application".to_string()));
+        assert_eq!(
+            app.icon_url,
+            Some("https://example.com/icon.png".to_string())
+        );
+        assert_eq!(app.category, Some("Development".to_string()));
+        assert_eq!(app.container_name, "myapp");
+        assert_eq!(app.container_id, "abc123def456");
+    }
+
+    #[test]
+    fn test_parse_homarr_labels_required_only() {
+        let labels = make_labels(&[
+            ("homarr.name", "Minimal App"),
+            ("homarr.url", "http://localhost:3000"),
+        ]);
+
+        let app = parse_homarr_labels("abcdef123456789", &labels).unwrap();
+        assert_eq!(app.name, "Minimal App");
+        assert_eq!(app.url, "http://localhost:3000");
+        assert_eq!(app.description, None);
+        assert_eq!(app.icon_url, None);
+        assert_eq!(app.category, None);
+        // Container name should be truncated container ID
+        assert_eq!(app.container_name, "abcdef123456");
+    }
+
+    #[test]
+    fn test_parse_homarr_labels_missing_name() {
+        let labels = make_labels(&[("homarr.url", "http://localhost:8080")]);
+
+        let result = parse_homarr_labels("container123", &labels);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_homarr_labels_missing_url() {
+        let labels = make_labels(&[("homarr.name", "App Without URL")]);
+
+        let result = parse_homarr_labels("container123", &labels);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_homarr_labels_short_container_id() {
+        let labels = make_labels(&[("homarr.name", "Test"), ("homarr.url", "http://test")]);
+
+        // Container ID shorter than 12 chars should be used as-is
+        let app = parse_homarr_labels("short", &labels).unwrap();
+        assert_eq!(app.container_name, "short");
+    }
+
+    #[test]
+    fn test_parse_homarr_labels_compose_service_overrides_id() {
+        let labels = make_labels(&[
+            ("homarr.name", "Test"),
+            ("homarr.url", "http://test"),
+            ("com.docker.compose.service", "custom-service"),
+        ]);
+
+        let app = parse_homarr_labels("abcdef123456789", &labels).unwrap();
+        // Compose service name should be used instead of container ID
+        assert_eq!(app.container_name, "custom-service");
+    }
+}
