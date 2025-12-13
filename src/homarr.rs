@@ -401,7 +401,10 @@ impl HomarrClient {
         let url = format!("{}/api/trpc/app.create", self.base_url);
         // Default to Docker icon if no icon specified
         let default_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/svg/docker.svg";
-        let icon_url = app.icon_url.clone().unwrap_or_else(|| default_icon.to_string());
+        let icon_url = app
+            .icon_url
+            .clone()
+            .unwrap_or_else(|| default_icon.to_string());
 
         let payload = json!({
             "json": {
@@ -750,10 +753,7 @@ mod tests {
     fn test_find_next_position_items_without_layouts() {
         let client = create_test_client();
         // Items missing layouts field
-        let items = vec![
-            json!({"id": "item1"}),
-            json!({"layouts": []}),
-        ];
+        let items = vec![json!({"id": "item1"}), json!({"layouts": []})];
         let (x, y) = client.find_next_position(&items, 10);
         // Should handle gracefully and start at origin
         assert_eq!((x, y), (0, 0));
