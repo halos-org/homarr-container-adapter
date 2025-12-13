@@ -117,8 +117,7 @@ POSTRM
         ls -la *.deb
     '
 
-# Move package to workspace root
-mv homarr-container-adapter_*.deb ./
-
+# Package is already in workspace root (Docker volume mount)
+# Just verify it exists
 echo "=== Build complete ==="
 ls -la *.deb
