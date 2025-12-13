@@ -1,7 +1,10 @@
 # Dockerfile for building arm64 Debian packages with Rust cross-compilation
 FROM debian:trixie-slim
 
-# Install build dependencies
+# Enable arm64 architecture first (required for cross-compilation dependencies)
+RUN dpkg --add-architecture arm64
+
+# Install build dependencies (including arm64 cross-compilation libs)
 RUN apt-get update && apt-get install -y \
     curl \
     build-essential \
@@ -15,12 +18,6 @@ RUN apt-get update && apt-get install -y \
     gcc-aarch64-linux-gnu \
     libc6-dev-arm64-cross \
     libssl-dev:arm64 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Enable arm64 architecture for cross-compilation dependencies
-RUN dpkg --add-architecture arm64 \
-    && apt-get update \
-    && apt-get install -y libssl-dev:arm64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust
