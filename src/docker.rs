@@ -239,6 +239,110 @@ mod tests {
             .collect()
     }
 
+    // ContainerEvent tests
+    #[test]
+    fn test_container_event_started_contains_app_data() {
+        let app = DiscoveredApp {
+            container_id: "abc123".to_string(),
+            container_name: "test-container".to_string(),
+            name: "Test App".to_string(),
+            description: Some("A test app".to_string()),
+            url: "http://localhost:8080".to_string(),
+            icon_url: Some("https://example.com/icon.png".to_string()),
+            category: Some("Development".to_string()),
+        };
+
+        let event = ContainerEvent::Started(app.clone());
+
+        match event {
+            ContainerEvent::Started(inner_app) => {
+                assert_eq!(inner_app.container_id, "abc123");
+                assert_eq!(inner_app.name, "Test App");
+                assert_eq!(inner_app.url, "http://localhost:8080");
+            }
+            ContainerEvent::Stopped(_) => panic!("Expected Started event"),
+        }
+    }
+
+    #[test]
+    fn test_container_event_stopped_contains_container_id() {
+        let event = ContainerEvent::Stopped("container123".to_string());
+
+        match event {
+            ContainerEvent::Stopped(id) => {
+                assert_eq!(id, "container123");
+            }
+            ContainerEvent::Started(_) => panic!("Expected Stopped event"),
+        }
+    }
+
+    #[test]
+    fn test_container_event_clone() {
+        let app = DiscoveredApp {
+            container_id: "abc123".to_string(),
+            container_name: "test".to_string(),
+            name: "Test".to_string(),
+            description: None,
+            url: "http://test".to_string(),
+            icon_url: None,
+            category: None,
+        };
+
+        let event = ContainerEvent::Started(app);
+        let cloned = event.clone();
+
+        // Both should match
+        match (&event, &cloned) {
+            (ContainerEvent::Started(e1), ContainerEvent::Started(e2)) => {
+                assert_eq!(e1.container_id, e2.container_id);
+                assert_eq!(e1.name, e2.name);
+            }
+            _ => panic!("Clone should produce same variant"),
+        }
+    }
+
+    // DiscoveredApp tests
+    #[test]
+    fn test_discovered_app_clone() {
+        let app = DiscoveredApp {
+            container_id: "abc123".to_string(),
+            container_name: "test-container".to_string(),
+            name: "Test App".to_string(),
+            description: Some("Description".to_string()),
+            url: "http://localhost".to_string(),
+            icon_url: Some("https://icon.url".to_string()),
+            category: Some("Category".to_string()),
+        };
+
+        let cloned = app.clone();
+
+        assert_eq!(app.container_id, cloned.container_id);
+        assert_eq!(app.container_name, cloned.container_name);
+        assert_eq!(app.name, cloned.name);
+        assert_eq!(app.description, cloned.description);
+        assert_eq!(app.url, cloned.url);
+        assert_eq!(app.icon_url, cloned.icon_url);
+        assert_eq!(app.category, cloned.category);
+    }
+
+    #[test]
+    fn test_discovered_app_debug_format() {
+        let app = DiscoveredApp {
+            container_id: "abc123".to_string(),
+            container_name: "test".to_string(),
+            name: "Test App".to_string(),
+            description: None,
+            url: "http://test".to_string(),
+            icon_url: None,
+            category: None,
+        };
+
+        let debug_str = format!("{:?}", app);
+        assert!(debug_str.contains("Test App"));
+        assert!(debug_str.contains("abc123"));
+    }
+
+    // parse_homarr_labels tests
     #[test]
     fn test_parse_homarr_labels_all_fields() {
         let labels = make_labels(&[

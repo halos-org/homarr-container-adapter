@@ -572,6 +572,26 @@ mod tests {
         HomarrClient::new("http://localhost:7575").unwrap()
     }
 
+    // HomarrClient creation tests
+    #[test]
+    fn test_client_new_valid_url() {
+        let client = HomarrClient::new("http://localhost:7575");
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_client_new_strips_trailing_slash() {
+        let client = HomarrClient::new("http://localhost:7575/").unwrap();
+        assert_eq!(client.base_url, "http://localhost:7575");
+    }
+
+    #[test]
+    fn test_client_new_preserves_path() {
+        let client = HomarrClient::new("http://localhost:7575/homarr").unwrap();
+        assert_eq!(client.base_url, "http://localhost:7575/homarr");
+    }
+
+    // find_next_position tests
     #[test]
     fn test_find_next_position_empty_board() {
         let client = create_test_client();
@@ -676,5 +696,66 @@ mod tests {
         let (x, y) = client.find_next_position(&items, 10);
         // Should place in the same row but different column
         assert_eq!((x, y), (1, 2));
+    }
+
+    #[test]
+    fn test_find_next_position_multiple_rows() {
+        let client = create_test_client();
+        // Items in multiple rows
+        let items = vec![
+            json!({
+                "layouts": [{
+                    "xOffset": 0,
+                    "yOffset": 0,
+                    "width": 10,
+                    "height": 1
+                }]
+            }),
+            json!({
+                "layouts": [{
+                    "xOffset": 0,
+                    "yOffset": 1,
+                    "width": 5,
+                    "height": 1
+                }]
+            }),
+        ];
+        let (x, y) = client.find_next_position(&items, 10);
+        // Should place after the item in row 1
+        assert_eq!((x, y), (5, 1));
+    }
+
+    #[test]
+    fn test_find_next_position_small_column_count() {
+        let client = create_test_client();
+        // Fill a 3-column board
+        let items: Vec<serde_json::Value> = (0..3)
+            .map(|i| {
+                json!({
+                    "layouts": [{
+                        "xOffset": i,
+                        "yOffset": 0,
+                        "width": 1,
+                        "height": 1
+                    }]
+                })
+            })
+            .collect();
+        let (x, y) = client.find_next_position(&items, 3);
+        // Should start a new row
+        assert_eq!((x, y), (0, 1));
+    }
+
+    #[test]
+    fn test_find_next_position_items_without_layouts() {
+        let client = create_test_client();
+        // Items missing layouts field
+        let items = vec![
+            json!({"id": "item1"}),
+            json!({"layouts": []}),
+        ];
+        let (x, y) = client.find_next_position(&items, 10);
+        // Should handle gracefully and start at origin
+        assert_eq!((x, y), (0, 0));
     }
 }
