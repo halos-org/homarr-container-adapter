@@ -2,7 +2,7 @@
 //!
 //! This service provides:
 //! - First-boot setup: Completes Homarr onboarding with HaLOS branding
-//! - Auto-discovery: Scans Docker containers and adds them to Homarr dashboard
+//! - Auto-discovery: Watches Docker containers and adds them to Homarr dashboard in real-time
 
 mod branding;
 mod config;
@@ -12,10 +12,12 @@ mod homarr;
 mod state;
 
 use clap::{Parser, Subcommand};
-use tracing::{info, Level};
+use tokio::sync::mpsc;
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
+use crate::docker::ContainerEvent;
 use crate::error::Result;
 
 #[derive(Parser)]
@@ -24,7 +26,11 @@ use crate::error::Result;
 #[command(version)]
 struct Cli {
     /// Config file path
-    #[arg(short, long, default_value = "/etc/homarr-container-adapter/config.toml")]
+    #[arg(
+        short,
+        long,
+        default_value = "/etc/homarr-container-adapter/config.toml"
+    )]
     config: String,
 
     /// Enable debug logging
@@ -37,13 +43,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run a single sync cycle (for systemd timer)
+    /// Watch Docker events and sync containers in real-time (main daemon mode)
+    Watch,
+
+    /// Run a single sync cycle (scan all containers once)
     Sync,
 
     /// Run first-boot setup only
     Setup,
 
-    /// Check if first-boot setup is needed
+    /// Check adapter status
     Status,
 }
 
@@ -63,6 +72,10 @@ async fn main() -> Result<()> {
     let config = Config::load(&cli.config)?;
 
     match cli.command {
+        Commands::Watch => {
+            info!("Starting watch mode");
+            run_watch(&config).await?;
+        }
         Commands::Sync => {
             info!("Running sync cycle");
             run_sync(&config).await?;
@@ -79,21 +92,164 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_sync(config: &Config) -> Result<()> {
-    // Check if first-boot setup is needed
-    let state = state::State::load(&config.state_file)?;
+/// Main watch loop - monitors Docker events and syncs in real-time
+async fn run_watch(config: &Config) -> Result<()> {
+    // Ensure first-boot setup is done
+    let mut state = state::State::load(&config.state_file).unwrap_or_default();
 
     if !state.first_boot_completed {
         info!("First boot detected, running setup");
         run_setup(config).await?;
+        state = state::State::load(&config.state_file).unwrap_or_default();
     }
 
-    // Scan Docker containers and update Homarr
+    // Load branding for board name
+    let branding = branding::BrandingConfig::load(&config.branding_file)?;
+
+    // Create Homarr client and login
+    let client = homarr::HomarrClient::new(&config.homarr_url)?;
+    client.ensure_logged_in(&branding).await?;
+
+    // Do initial sync of existing containers
+    info!("Initial sync of existing containers");
+    let discovered = docker::discover_apps(config).await?;
+    for app in &discovered {
+        if !state.discovered_apps.contains_key(&app.container_id) {
+            match client.add_discovered_app(app, &branding.board.name).await {
+                Ok(_) => {
+                    state.discovered_apps.insert(
+                        app.container_id.clone(),
+                        state::DiscoveredApp {
+                            name: app.name.clone(),
+                            url: app.url.clone(),
+                            added_at: chrono::Utc::now(),
+                        },
+                    );
+                    state.save(&config.state_file)?;
+                }
+                Err(e) => {
+                    warn!("Failed to add app '{}': {}", app.name, e);
+                }
+            }
+        }
+    }
+
+    // Start watching Docker events
+    let (tx, mut rx) = mpsc::channel::<ContainerEvent>(32);
+
+    // Spawn event watcher task
+    let watch_config = config.clone();
+    tokio::spawn(async move {
+        if let Err(e) = docker::watch_events(&watch_config, tx).await {
+            tracing::error!("Docker event watcher failed: {}", e);
+        }
+    });
+
+    // Process events
+    info!("Watching for Docker container events...");
+    while let Some(event) = rx.recv().await {
+        match event {
+            ContainerEvent::Started(app) => {
+                // Check if already tracked
+                if state.discovered_apps.contains_key(&app.container_id) {
+                    info!("App '{}' already tracked, skipping", app.name);
+                    continue;
+                }
+
+                // Check if user removed it
+                if state.is_removed(&app.container_id) {
+                    info!("App '{}' was removed by user, skipping", app.name);
+                    continue;
+                }
+
+                // Re-login in case session expired
+                if let Err(e) = client.ensure_logged_in(&branding).await {
+                    warn!("Failed to login: {}", e);
+                    continue;
+                }
+
+                // Add to Homarr
+                match client.add_discovered_app(&app, &branding.board.name).await {
+                    Ok(_) => {
+                        state.discovered_apps.insert(
+                            app.container_id.clone(),
+                            state::DiscoveredApp {
+                                name: app.name.clone(),
+                                url: app.url.clone(),
+                                added_at: chrono::Utc::now(),
+                            },
+                        );
+                        state.update_sync_time();
+                        if let Err(e) = state.save(&config.state_file) {
+                            warn!("Failed to save state: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to add app '{}' to Homarr: {}", app.name, e);
+                    }
+                }
+            }
+            ContainerEvent::Stopped(container_id) => {
+                // Log container stop but don't remove from Homarr
+                // (apps may restart, user can remove manually if needed)
+                if let Some(app) = state.discovered_apps.get(&container_id) {
+                    info!("Container stopped: {} (keeping in Homarr)", app.name);
+                }
+            }
+        }
+    }
+
+    warn!("Event channel closed, exiting watch mode");
+    Ok(())
+}
+
+async fn run_sync(config: &Config) -> Result<()> {
+    // Check if first-boot setup is needed
+    let mut state = state::State::load(&config.state_file)?;
+
+    if !state.first_boot_completed {
+        info!("First boot detected, running setup");
+        run_setup(config).await?;
+        // Reload state after setup (it saved first_boot_completed = true)
+        state = state::State::load(&config.state_file)?;
+    }
+
+    // Load branding
+    let branding = branding::BrandingConfig::load(&config.branding_file)?;
+
+    // Scan Docker containers
     info!("Scanning Docker containers");
     let discovered = docker::discover_apps(config).await?;
 
-    info!("Updating Homarr dashboard");
-    homarr::sync_apps(config, &discovered).await?;
+    // Create client and login
+    let client = homarr::HomarrClient::new(&config.homarr_url)?;
+    client.ensure_logged_in(&branding).await?;
+
+    // Add new apps
+    for app in &discovered {
+        if !state.discovered_apps.contains_key(&app.container_id)
+            && !state.is_removed(&app.container_id)
+        {
+            match client.add_discovered_app(app, &branding.board.name).await {
+                Ok(_) => {
+                    state.discovered_apps.insert(
+                        app.container_id.clone(),
+                        state::DiscoveredApp {
+                            name: app.name.clone(),
+                            url: app.url.clone(),
+                            added_at: chrono::Utc::now(),
+                        },
+                    );
+                }
+                Err(e) => {
+                    warn!("Failed to add app '{}': {}", app.name, e);
+                }
+            }
+        }
+    }
+
+    state.update_sync_time();
+    state.save(&config.state_file)?;
 
     info!("Sync complete");
     Ok(())
@@ -134,6 +290,15 @@ async fn check_status(config: &Config) -> Result<()> {
     if state.first_boot_completed {
         println!("Status: First-boot setup completed");
         println!("Last sync: {:?}", state.last_sync);
+        println!("Discovered apps: {}", state.discovered_apps.len());
+        for (id, app) in &state.discovered_apps {
+            println!(
+                "  - {} ({}) [{}]",
+                app.name,
+                app.url,
+                &id[..12.min(id.len())]
+            );
+        }
     } else {
         println!("Status: First-boot setup pending");
     }

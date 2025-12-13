@@ -4,10 +4,11 @@ use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 
-use crate::error::{AdapterError, Result};
+use crate::error::Result;
 
 /// Main adapter configuration
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct Config {
     /// Homarr API URL
     #[serde(default = "default_homarr_url")]

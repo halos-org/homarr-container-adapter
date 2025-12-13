@@ -8,6 +8,7 @@ use crate::error::{AdapterError, Result};
 
 /// Branding configuration loaded from /etc/homarr-branding-halos/branding.toml
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct BrandingConfig {
     pub identity: Identity,
     pub theme: Theme,
@@ -17,6 +18,7 @@ pub struct BrandingConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct Identity {
     pub product_name: String,
     pub logo_path: String,
@@ -25,6 +27,7 @@ pub struct Identity {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct Theme {
     pub default_color_scheme: String,
     pub primary_color: String,
@@ -50,6 +53,7 @@ pub struct Credentials {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct Board {
     pub name: String,
     pub display_name: String,
