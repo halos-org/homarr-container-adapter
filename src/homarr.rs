@@ -398,11 +398,15 @@ impl HomarrClient {
     ) -> Result<String> {
         // Create the app in Homarr
         let url = format!("{}/api/trpc/app.create", self.base_url);
+        // Default to Docker icon if no icon specified
+        let default_icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/svg/docker.svg";
+        let icon_url = app.icon_url.clone().unwrap_or_else(|| default_icon.to_string());
+
         let payload = json!({
             "json": {
                 "name": app.name,
-                "description": app.description,
-                "iconUrl": app.icon_url,
+                "description": app.description.clone().unwrap_or_default(),
+                "iconUrl": icon_url,
                 "href": app.url,
                 "pingUrl": null
             }
