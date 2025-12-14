@@ -116,6 +116,9 @@ fn transform_icon_url(icon_path: &str) -> String {
 
     // Transform /usr/share/pixmaps/ paths to /icons/
     if let Some(filename) = icon_path.strip_prefix(PIXMAPS_PREFIX) {
+        if filename.is_empty() {
+            return LOCAL_DEFAULT_ICON.to_string();
+        }
         return format!("/icons/{}", filename);
     }
 
@@ -848,5 +851,12 @@ mod tests {
         // Already transformed /icons/ paths should pass through
         let result = transform_icon_url("/icons/existing.svg");
         assert_eq!(result, "/icons/existing.svg");
+    }
+
+    #[test]
+    fn test_transform_icon_url_pixmaps_trailing_slash_only() {
+        // Edge case: pixmaps path with trailing slash but no filename
+        let result = transform_icon_url("/usr/share/pixmaps/");
+        assert_eq!(result, "/icons/docker.svg");
     }
 }
