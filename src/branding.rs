@@ -1,4 +1,4 @@
-//! Branding configuration from homarr-branding-halos package
+//! Branding configuration from halos-homarr-branding package
 
 use serde::Deserialize;
 use std::fs;
@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::error::{AdapterError, Result};
 
-/// Branding configuration loaded from /etc/homarr-branding-halos/branding.toml
+/// Branding configuration loaded from /etc/halos-homarr-branding/branding.toml
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct BrandingConfig {

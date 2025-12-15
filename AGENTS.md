@@ -11,7 +11,7 @@ Rust service that bridges Docker containers with the Homarr dashboard. Two main 
 - `src/main.rs` - CLI entry point with setup/sync/status commands
 - `src/homarr.rs` - Homarr tRPC API client
 - `src/docker.rs` - Docker container discovery (bollard)
-- `src/branding.rs` - Parse branding.toml from homarr-branding-halos
+- `src/branding.rs` - Parse branding.toml from halos-homarr-branding
 - `src/state.rs` - Persistent state (JSON)
 - `src/config.rs` - Adapter configuration
 - `docs/SPEC.md` - Functional requirements
@@ -52,5 +52,5 @@ Native Debian package built with cargo-deb. See `debian/` directory.
 
 ## Related Repos
 
-- `homarr-branding-halos` - Provides `/etc/homarr-branding-halos/branding.toml`
+- `halos-homarr-branding` - Provides `/etc/halos-homarr-branding/branding.toml`
 - `halos-core-containers` - Defines homarr-container

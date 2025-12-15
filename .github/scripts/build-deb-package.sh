@@ -52,7 +52,7 @@ Package: ${PACKAGE_NAME}
 Version: ${DEB_VERSION}
 Architecture: arm64
 Maintainer: Hat Labs Ltd <info@hatlabs.fi>
-Depends: homarr-branding-halos
+Depends: halos-homarr-branding
 Description: Homarr dashboard adapter for HaLOS
  Adapter service that handles first-boot setup and container
  auto-discovery for the Homarr dashboard.

@@ -67,7 +67,7 @@ labels:
 homarr_url = "http://localhost:7575"
 
 # Path to branding configuration
-branding_file = "/etc/homarr-branding-halos/branding.toml"
+branding_file = "/etc/halos-homarr-branding/branding.toml"
 
 # State persistence file
 state_file = "/var/lib/homarr-container-adapter/state.json"
@@ -81,7 +81,7 @@ debug = false
 
 ### Branding Configuration
 
-See homarr-branding-halos package for branding configuration schema.
+See halos-homarr-branding package for branding configuration schema.
 
 ## API Interactions
 

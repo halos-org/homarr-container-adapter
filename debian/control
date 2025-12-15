@@ -8,7 +8,7 @@ Homepage: https://github.com/hatlabs/homarr-container-adapter
 
 Package: homarr-container-adapter
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, homarr-branding-halos
+Depends: ${shlibs:Depends}, ${misc:Depends}, halos-homarr-branding
 Description: Homarr dashboard adapter for HaLOS
  Adapter service that handles first-boot setup and container
  auto-discovery for the Homarr dashboard.

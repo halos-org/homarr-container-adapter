@@ -45,7 +45,7 @@ labels:
 ## Configuration
 
 Adapter config: `/etc/homarr-container-adapter/config.toml`
-Branding config: `/etc/homarr-branding-halos/branding.toml` (from homarr-branding-halos package)
+Branding config: `/etc/halos-homarr-branding/branding.toml` (from halos-homarr-branding package)
 
 ## Building
 
@@ -63,7 +63,7 @@ cargo test
 ## Related Packages
 
 - `homarr-container` - Homarr dashboard container
-- `homarr-branding-halos` - HaLOS branding configuration
+- `halos-homarr-branding` - HaLOS branding configuration
 
 ## License
 

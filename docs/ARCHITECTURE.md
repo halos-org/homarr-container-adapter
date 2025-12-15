@@ -61,7 +61,7 @@ src/
 - Path resolution
 
 #### branding.rs
-- Parse branding.toml from homarr-branding-halos
+- Parse branding.toml from halos-homarr-branding
 - Type definitions for identity, theme, credentials, board config
 - Validation of branding settings
 
@@ -142,7 +142,7 @@ src/
 ```
 /etc/homarr-container-adapter/config.toml  (adapter config)
          │
-         └──► branding_file ──► /etc/homarr-branding-halos/branding.toml
+         └──► branding_file ──► /etc/halos-homarr-branding/branding.toml
          │
          └──► state_file ──► /var/lib/homarr-container-adapter/state.json
 ```
@@ -165,7 +165,7 @@ src/
 ### Runtime Dependencies
 - Docker daemon (socket access)
 - Homarr container running
-- homarr-branding-halos package installed
+- halos-homarr-branding package installed
 
 ### Build Dependencies
 - Rust toolchain (1.70+)

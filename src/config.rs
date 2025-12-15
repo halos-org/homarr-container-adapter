@@ -36,7 +36,7 @@ fn default_homarr_url() -> String {
 }
 
 fn default_branding_file() -> String {
-    "/etc/homarr-branding-halos/branding.toml".to_string()
+    "/etc/halos-homarr-branding/branding.toml".to_string()
 }
 
 fn default_state_file() -> String {
