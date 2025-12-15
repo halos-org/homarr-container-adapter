@@ -13,6 +13,7 @@ use crate::error::{AdapterError, Result};
 pub struct HomarrClient {
     client: Client,
     base_url: String,
+    asset_server_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,22 +87,22 @@ struct CreateAppResponse {
     id: String,
 }
 
-/// Local default icon path for offline operation
+/// Local default icon path (relative, will be prefixed with asset server URL)
 const LOCAL_DEFAULT_ICON: &str = "/icons/docker.svg";
 
-/// Transform icon paths to URLs for Homarr's local icon serving.
+/// Transform icon paths to absolute URLs using the asset server.
 ///
-/// Homarr serves local icons from /app/public/icons, which is mounted from
-/// /usr/share/pixmaps. This function transforms:
-/// - `/usr/share/pixmaps/app.png` → `/icons/app.png`
+/// The asset server (nginx on port 8771) serves /icons/ from /usr/share/pixmaps.
+/// This function transforms:
+/// - `/usr/share/pixmaps/app.png` → `{asset_server_url}/icons/app.png`
 /// - HTTP/HTTPS URLs → unchanged
-/// - `/icons/*` paths → unchanged (already transformed)
-/// - Everything else → `/icons/docker.svg` (local fallback)
-fn transform_icon_url(icon_path: &str) -> String {
+/// - `/icons/*` paths → `{asset_server_url}/icons/*`
+/// - Everything else → `{asset_server_url}/icons/docker.svg` (fallback)
+fn transform_icon_url(icon_path: &str, asset_server_url: &str) -> String {
     const PIXMAPS_PREFIX: &str = "/usr/share/pixmaps/";
 
     if icon_path.is_empty() {
-        return LOCAL_DEFAULT_ICON.to_string();
+        return format!("{}{}", asset_server_url, LOCAL_DEFAULT_ICON);
     }
 
     // HTTP/HTTPS URLs pass through unchanged
@@ -109,26 +110,30 @@ fn transform_icon_url(icon_path: &str) -> String {
         return icon_path.to_string();
     }
 
-    // Already transformed /icons/ paths pass through
+    // Already transformed /icons/ paths - prepend asset server URL
     if icon_path.starts_with("/icons/") {
-        return icon_path.to_string();
+        return format!("{}{}", asset_server_url, icon_path);
     }
 
-    // Transform /usr/share/pixmaps/ paths to /icons/
+    // Transform /usr/share/pixmaps/ paths to asset server /icons/
     if let Some(filename) = icon_path.strip_prefix(PIXMAPS_PREFIX) {
         if filename.is_empty() {
-            return LOCAL_DEFAULT_ICON.to_string();
+            return format!("{}{}", asset_server_url, LOCAL_DEFAULT_ICON);
         }
-        return format!("/icons/{}", filename);
+        return format!("{}/icons/{}", asset_server_url, filename);
     }
 
-    // Unknown format - use local fallback
-    LOCAL_DEFAULT_ICON.to_string()
+    // Unknown format - use fallback
+    format!("{}{}", asset_server_url, LOCAL_DEFAULT_ICON)
 }
 
 impl HomarrClient {
     /// Create a new Homarr client
-    pub fn new(base_url: &str) -> Result<Self> {
+    ///
+    /// # Arguments
+    /// * `base_url` - The Homarr API base URL (e.g., "http://localhost:80")
+    /// * `asset_server_url` - The asset server URL for icons (e.g., "http://localhost:8771")
+    pub fn new(base_url: &str, asset_server_url: &str) -> Result<Self> {
         let jar = Arc::new(Jar::default());
         let client = Client::builder()
             .cookie_store(true)
@@ -138,6 +143,7 @@ impl HomarrClient {
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
+            asset_server_url: asset_server_url.trim_end_matches('/').to_string(),
         })
     }
 
@@ -332,7 +338,7 @@ impl HomarrClient {
 
         // Create app with transformed icon URL
         let url = format!("{}/api/trpc/app.create", self.base_url);
-        let icon_url = transform_icon_url(&cockpit.icon_url);
+        let icon_url = transform_icon_url(&cockpit.icon_url, &self.asset_server_url);
         let payload = json!({
             "json": {
                 "name": cockpit.name,
@@ -441,7 +447,10 @@ impl HomarrClient {
         // Create the app in Homarr
         let url = format!("{}/api/trpc/app.create", self.base_url);
         // Transform icon path and use local default if not specified
-        let icon_url = transform_icon_url(app.icon_url.as_deref().unwrap_or(LOCAL_DEFAULT_ICON));
+        let icon_url = transform_icon_url(
+            app.icon_url.as_deref().unwrap_or(LOCAL_DEFAULT_ICON),
+            &self.asset_server_url,
+        );
 
         let payload = json!({
             "json": {
@@ -609,25 +618,27 @@ mod tests {
     use serde_json::json;
 
     fn create_test_client() -> HomarrClient {
-        HomarrClient::new("http://localhost:7575").unwrap()
+        HomarrClient::new("http://localhost:7575", "http://localhost:8771").unwrap()
     }
 
     // HomarrClient creation tests
     #[test]
     fn test_client_new_valid_url() {
-        let client = HomarrClient::new("http://localhost:7575");
+        let client = HomarrClient::new("http://localhost:7575", "http://localhost:8771");
         assert!(client.is_ok());
     }
 
     #[test]
     fn test_client_new_strips_trailing_slash() {
-        let client = HomarrClient::new("http://localhost:7575/").unwrap();
+        let client = HomarrClient::new("http://localhost:7575/", "http://localhost:8771/").unwrap();
         assert_eq!(client.base_url, "http://localhost:7575");
+        assert_eq!(client.asset_server_url, "http://localhost:8771");
     }
 
     #[test]
     fn test_client_new_preserves_path() {
-        let client = HomarrClient::new("http://localhost:7575/homarr").unwrap();
+        let client =
+            HomarrClient::new("http://localhost:7575/homarr", "http://localhost:8771").unwrap();
         assert_eq!(client.base_url, "http://localhost:7575/homarr");
     }
 
@@ -797,66 +808,71 @@ mod tests {
     }
 
     // transform_icon_url tests
+    const TEST_ASSET_SERVER: &str = "http://localhost:8771";
+
     #[test]
     fn test_transform_icon_url_pixmaps_path() {
-        // File path in /usr/share/pixmaps should become /icons/filename
-        let result = transform_icon_url("/usr/share/pixmaps/app.png");
-        assert_eq!(result, "/icons/app.png");
+        // File path in /usr/share/pixmaps should become absolute URL with /icons/filename
+        let result = transform_icon_url("/usr/share/pixmaps/app.png", TEST_ASSET_SERVER);
+        assert_eq!(result, "http://localhost:8771/icons/app.png");
     }
 
     #[test]
     fn test_transform_icon_url_pixmaps_nested_path() {
         // Nested paths should preserve directory structure after pixmaps/
-        let result = transform_icon_url("/usr/share/pixmaps/subdir/icon.svg");
-        assert_eq!(result, "/icons/subdir/icon.svg");
+        let result = transform_icon_url("/usr/share/pixmaps/subdir/icon.svg", TEST_ASSET_SERVER);
+        assert_eq!(result, "http://localhost:8771/icons/subdir/icon.svg");
     }
 
     #[test]
     fn test_transform_icon_url_http_passthrough() {
         // HTTP URLs should pass through unchanged
-        let result = transform_icon_url("http://example.com/icon.png");
+        let result = transform_icon_url("http://example.com/icon.png", TEST_ASSET_SERVER);
         assert_eq!(result, "http://example.com/icon.png");
     }
 
     #[test]
     fn test_transform_icon_url_https_passthrough() {
         // HTTPS URLs should pass through unchanged
-        let result = transform_icon_url("https://cdn.example.com/icons/docker.svg");
+        let result = transform_icon_url(
+            "https://cdn.example.com/icons/docker.svg",
+            TEST_ASSET_SERVER,
+        );
         assert_eq!(result, "https://cdn.example.com/icons/docker.svg");
     }
 
     #[test]
     fn test_transform_icon_url_empty_string() {
-        // Empty string should return local docker fallback
-        let result = transform_icon_url("");
-        assert_eq!(result, "/icons/docker.svg");
+        // Empty string should return asset server URL with docker fallback
+        let result = transform_icon_url("", TEST_ASSET_SERVER);
+        assert_eq!(result, "http://localhost:8771/icons/docker.svg");
     }
 
     #[test]
     fn test_transform_icon_url_unrecognized_path() {
-        // Unrecognized file paths should return local docker fallback
-        let result = transform_icon_url("/some/other/path/icon.png");
-        assert_eq!(result, "/icons/docker.svg");
+        // Unrecognized file paths should return asset server URL with docker fallback
+        let result = transform_icon_url("/some/other/path/icon.png", TEST_ASSET_SERVER);
+        assert_eq!(result, "http://localhost:8771/icons/docker.svg");
     }
 
     #[test]
     fn test_transform_icon_url_relative_path() {
-        // Relative paths should return local docker fallback
-        let result = transform_icon_url("icons/app.png");
-        assert_eq!(result, "/icons/docker.svg");
+        // Relative paths should return asset server URL with docker fallback
+        let result = transform_icon_url("icons/app.png", TEST_ASSET_SERVER);
+        assert_eq!(result, "http://localhost:8771/icons/docker.svg");
     }
 
     #[test]
     fn test_transform_icon_url_icons_path_passthrough() {
-        // Already transformed /icons/ paths should pass through
-        let result = transform_icon_url("/icons/existing.svg");
-        assert_eq!(result, "/icons/existing.svg");
+        // Already transformed /icons/ paths should get asset server prefix
+        let result = transform_icon_url("/icons/existing.svg", TEST_ASSET_SERVER);
+        assert_eq!(result, "http://localhost:8771/icons/existing.svg");
     }
 
     #[test]
     fn test_transform_icon_url_pixmaps_trailing_slash_only() {
         // Edge case: pixmaps path with trailing slash but no filename
-        let result = transform_icon_url("/usr/share/pixmaps/");
-        assert_eq!(result, "/icons/docker.svg");
+        let result = transform_icon_url("/usr/share/pixmaps/", TEST_ASSET_SERVER);
+        assert_eq!(result, "http://localhost:8771/icons/docker.svg");
     }
 }

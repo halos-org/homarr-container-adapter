@@ -107,7 +107,7 @@ async fn run_watch(config: &Config) -> Result<()> {
     let branding = branding::BrandingConfig::load(&config.branding_file)?;
 
     // Create Homarr client and login
-    let client = homarr::HomarrClient::new(&config.homarr_url)?;
+    let client = homarr::HomarrClient::new(&config.homarr_url, &config.asset_server_url)?;
     client.ensure_logged_in(&branding).await?;
 
     // Do initial sync of existing containers
@@ -222,7 +222,7 @@ async fn run_sync(config: &Config) -> Result<()> {
     let discovered = docker::discover_apps(config).await?;
 
     // Create client and login
-    let client = homarr::HomarrClient::new(&config.homarr_url)?;
+    let client = homarr::HomarrClient::new(&config.homarr_url, &config.asset_server_url)?;
     client.ensure_logged_in(&branding).await?;
 
     // Add new apps
@@ -260,7 +260,7 @@ async fn run_setup(config: &Config) -> Result<()> {
     let branding = branding::BrandingConfig::load(&config.branding_file)?;
 
     // Create Homarr client
-    let client = homarr::HomarrClient::new(&config.homarr_url)?;
+    let client = homarr::HomarrClient::new(&config.homarr_url, &config.asset_server_url)?;
 
     // Check onboarding status
     let step = client.get_onboarding_step().await?;

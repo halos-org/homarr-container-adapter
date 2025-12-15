@@ -14,7 +14,8 @@ override_dh_auto_install:
 		debian/homarr-container-adapter/usr/bin/homarr-container-adapter
 	install -D -m 644 debian/homarr-container-adapter.service \
 		debian/homarr-container-adapter/lib/systemd/system/homarr-container-adapter.service
-	install -d debian/homarr-container-adapter/etc/homarr-container-adapter
+	install -D -m 644 etc/config.toml \
+		debian/homarr-container-adapter/etc/homarr-container-adapter/config.toml
 	install -d debian/homarr-container-adapter/var/lib/homarr-container-adapter
 
 override_dh_auto_clean:
