@@ -597,6 +597,9 @@ impl HomarrClient {
         if let Some(existing_app) = existing {
             // Update existing app instead of creating duplicate
             self.update_app(&existing_app.id, app).await?;
+            // Also ensure it's on the board (it might exist but not be on this board)
+            self.add_discovered_app_to_board(&existing_app.id, app, board_name)
+                .await?;
             return Ok(existing_app.id);
         }
 
