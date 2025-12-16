@@ -86,6 +86,17 @@ struct CreateAppResponse {
     id: String,
 }
 
+/// Minimal app data from app.selectable endpoint
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct SelectableApp {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "iconUrl")]
+    pub icon_url: String,
+    pub href: Option<String>,
+}
+
 /// Default icon path (relative URL)
 const DEFAULT_ICON: &str = "/icons/docker.svg";
 
@@ -497,13 +508,98 @@ impl HomarrClient {
         self.login(branding).await
     }
 
-    /// Add a discovered app to Homarr
+    /// Get all apps (minimal data for matching)
+    ///
+    /// Returns all apps from Homarr for deduplication checks.
+    /// Callers can cache this result to avoid repeated API calls.
+    pub async fn get_all_apps(&self) -> Result<Vec<SelectableApp>> {
+        let url = format!("{}/api/trpc/app.selectable", self.base_url);
+        let response = self.client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "Failed to fetch apps ({}): {}",
+                status, text
+            )));
+        }
+
+        let trpc_response: TrpcResponse<Vec<SelectableApp>> = response.json().await?;
+        Ok(trpc_response.result.data.json)
+    }
+
+    /// Find an existing app by URL in a pre-fetched list
+    fn find_app_in_list<'a>(apps: &'a [SelectableApp], url: &str) -> Option<&'a SelectableApp> {
+        apps.iter().find(|app| app.href.as_deref() == Some(url))
+    }
+
+    /// Update an existing app
+    async fn update_app(&self, app_id: &str, app: &DiscoveredApp) -> Result<()> {
+        let url = format!("{}/api/trpc/app.update", self.base_url);
+        let icon_url = transform_icon_url(app.icon_url.as_deref().unwrap_or(DEFAULT_ICON));
+
+        let payload = json!({
+            "json": {
+                "id": app_id,
+                "name": app.name,
+                "description": app.description.clone().unwrap_or_default(),
+                "iconUrl": icon_url,
+                "href": app.url
+            }
+        });
+
+        let response = self.client.post(&url).json(&payload).send().await?;
+
+        if !response.status().is_success() {
+            let text = response.text().await?;
+            return Err(AdapterError::HomarrApi(format!(
+                "Failed to update app '{}': {}",
+                app.name, text
+            )));
+        }
+
+        tracing::info!("Updated existing app '{}' (app_id: {})", app.name, app_id);
+        Ok(())
+    }
+
+    /// Add a discovered app to Homarr (or update if already exists)
+    ///
+    /// If `existing_apps` is provided, it will be used for deduplication lookup
+    /// instead of fetching from the API. This improves performance when adding
+    /// multiple apps in a batch.
     pub async fn add_discovered_app(
         &self,
         app: &DiscoveredApp,
         board_name: &str,
+        existing_apps: Option<&[SelectableApp]>,
     ) -> Result<String> {
-        // Create the app in Homarr
+        // Check if an app with the same URL already exists
+        let existing = match existing_apps {
+            Some(apps) => Self::find_app_in_list(apps, &app.url).cloned(),
+            None => {
+                // Fetch apps for deduplication check
+                match self.get_all_apps().await {
+                    Ok(apps) => Self::find_app_in_list(&apps, &app.url).cloned(),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to fetch existing apps for deduplication: {}. \
+                             Proceeding with create (may create duplicate).",
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+        };
+
+        if let Some(existing_app) = existing {
+            // Update existing app instead of creating duplicate
+            self.update_app(&existing_app.id, app).await?;
+            return Ok(existing_app.id);
+        }
+
+        // Create new app in Homarr
         let url = format!("{}/api/trpc/app.create", self.base_url);
         // Transform icon path and use default if not specified
         let icon_url = transform_icon_url(app.icon_url.as_deref().unwrap_or(DEFAULT_ICON));

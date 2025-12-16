@@ -113,9 +113,17 @@ async fn run_watch(config: &Config) -> Result<()> {
     // Do initial sync of existing containers
     info!("Initial sync of existing containers");
     let discovered = docker::discover_apps(config).await?;
+    // Pre-fetch existing apps for efficient deduplication
+    let existing_apps = client.get_all_apps().await.unwrap_or_else(|e| {
+        warn!("Failed to fetch existing apps: {}", e);
+        vec![]
+    });
     for app in &discovered {
         if !state.discovered_apps.contains_key(&app.container_id) {
-            match client.add_discovered_app(app, &branding.board.name).await {
+            match client
+                .add_discovered_app(app, &branding.board.name, Some(&existing_apps))
+                .await
+            {
                 Ok(_) => {
                     state.discovered_apps.insert(
                         app.container_id.clone(),
@@ -168,8 +176,11 @@ async fn run_watch(config: &Config) -> Result<()> {
                     continue;
                 }
 
-                // Add to Homarr
-                match client.add_discovered_app(&app, &branding.board.name).await {
+                // Add to Homarr (no cached list for single event)
+                match client
+                    .add_discovered_app(&app, &branding.board.name, None)
+                    .await
+                {
                     Ok(_) => {
                         state.discovered_apps.insert(
                             app.container_id.clone(),
@@ -225,12 +236,21 @@ async fn run_sync(config: &Config) -> Result<()> {
     let client = homarr::HomarrClient::new(&config.homarr_url)?;
     client.ensure_logged_in(&branding).await?;
 
+    // Pre-fetch existing apps for efficient deduplication
+    let existing_apps = client.get_all_apps().await.unwrap_or_else(|e| {
+        warn!("Failed to fetch existing apps: {}", e);
+        vec![]
+    });
+
     // Add new apps
     for app in &discovered {
         if !state.discovered_apps.contains_key(&app.container_id)
             && !state.is_removed(&app.container_id)
         {
-            match client.add_discovered_app(app, &branding.board.name).await {
+            match client
+                .add_discovered_app(app, &branding.board.name, Some(&existing_apps))
+                .await
+            {
                 Ok(_) => {
                     state.discovered_apps.insert(
                         app.container_id.clone(),
