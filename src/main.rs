@@ -120,7 +120,13 @@ async fn run_watch(config: &Config) -> Result<()> {
     });
     for app in &discovered {
         // Use URL as key for deduplication (container_id changes on restart)
-        if !state.discovered_apps.contains_key(&app.url) {
+        if let Some(existing) = state.discovered_apps.get_mut(&app.url) {
+            // App already tracked - update container_id if it changed (container restart)
+            if existing.container_id != app.container_id {
+                existing.container_id = app.container_id.clone();
+                state.save(&config.state_file)?;
+            }
+        } else {
             match client
                 .add_discovered_app(app, &branding.board.name, Some(&existing_apps))
                 .await
@@ -160,8 +166,20 @@ async fn run_watch(config: &Config) -> Result<()> {
         match event {
             ContainerEvent::Started(app) => {
                 // Check if already tracked (by URL, not container_id)
-                if state.discovered_apps.contains_key(&app.url) {
-                    info!("App '{}' already tracked, skipping", app.name);
+                if let Some(existing) = state.discovered_apps.get_mut(&app.url) {
+                    // App already tracked - update container_id if changed (container restart)
+                    if existing.container_id != app.container_id {
+                        info!(
+                            "App '{}' restarted with new container_id, updating",
+                            app.name
+                        );
+                        existing.container_id = app.container_id.clone();
+                        if let Err(e) = state.save(&config.state_file) {
+                            warn!("Failed to save state: {}", e);
+                        }
+                    } else {
+                        info!("App '{}' already tracked, skipping", app.name);
+                    }
                     continue;
                 }
 
@@ -250,7 +268,12 @@ async fn run_sync(config: &Config) -> Result<()> {
 
     // Add new apps (use URL as key for deduplication)
     for app in &discovered {
-        if !state.discovered_apps.contains_key(&app.url) && !state.is_removed(&app.url) {
+        if let Some(existing) = state.discovered_apps.get_mut(&app.url) {
+            // App already tracked - update container_id if changed (container restart)
+            if existing.container_id != app.container_id {
+                existing.container_id = app.container_id.clone();
+            }
+        } else if !state.is_removed(&app.url) {
             match client
                 .add_discovered_app(app, &branding.board.name, Some(&existing_apps))
                 .await

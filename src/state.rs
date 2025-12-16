@@ -220,7 +220,8 @@ mod tests {
         );
 
         // Same URL, different container (after restart)
-        // This should update, not create duplicate
+        // HashMap.insert with same key replaces the value - no duplicate possible
+        // In the actual app code, we use get_mut() to update container_id in place
         state.discovered_apps.insert(
             url.clone(),
             DiscoveredApp {
@@ -230,7 +231,7 @@ mod tests {
             },
         );
 
-        // Should have exactly one entry
+        // Should have exactly one entry (URL-keyed HashMap prevents duplicates)
         assert_eq!(state.discovered_apps.len(), 1);
         // Should have the new container_id
         assert_eq!(
