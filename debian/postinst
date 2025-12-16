@@ -5,7 +5,7 @@ case "$1" in
     configure)
         # Create state directory with proper permissions
         mkdir -p /var/lib/homarr-container-adapter
-        chmod 700 /var/lib/homarr-container-adapter
+        chmod 755 /var/lib/homarr-container-adapter
 
         # Enable and start the service
         if [ -d /run/systemd/system ]; then
