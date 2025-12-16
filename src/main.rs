@@ -119,17 +119,18 @@ async fn run_watch(config: &Config) -> Result<()> {
         vec![]
     });
     for app in &discovered {
-        if !state.discovered_apps.contains_key(&app.container_id) {
+        // Use URL as key for deduplication (container_id changes on restart)
+        if !state.discovered_apps.contains_key(&app.url) {
             match client
                 .add_discovered_app(app, &branding.board.name, Some(&existing_apps))
                 .await
             {
                 Ok(_) => {
                     state.discovered_apps.insert(
-                        app.container_id.clone(),
+                        app.url.clone(),
                         state::DiscoveredApp {
                             name: app.name.clone(),
-                            url: app.url.clone(),
+                            container_id: app.container_id.clone(),
                             added_at: chrono::Utc::now(),
                         },
                     );
@@ -158,14 +159,14 @@ async fn run_watch(config: &Config) -> Result<()> {
     while let Some(event) = rx.recv().await {
         match event {
             ContainerEvent::Started(app) => {
-                // Check if already tracked
-                if state.discovered_apps.contains_key(&app.container_id) {
+                // Check if already tracked (by URL, not container_id)
+                if state.discovered_apps.contains_key(&app.url) {
                     info!("App '{}' already tracked, skipping", app.name);
                     continue;
                 }
 
-                // Check if user removed it
-                if state.is_removed(&app.container_id) {
+                // Check if user removed it (by URL)
+                if state.is_removed(&app.url) {
                     info!("App '{}' was removed by user, skipping", app.name);
                     continue;
                 }
@@ -183,10 +184,10 @@ async fn run_watch(config: &Config) -> Result<()> {
                 {
                     Ok(_) => {
                         state.discovered_apps.insert(
-                            app.container_id.clone(),
+                            app.url.clone(),
                             state::DiscoveredApp {
                                 name: app.name.clone(),
-                                url: app.url.clone(),
+                                container_id: app.container_id.clone(),
                                 added_at: chrono::Utc::now(),
                             },
                         );
@@ -203,7 +204,12 @@ async fn run_watch(config: &Config) -> Result<()> {
             ContainerEvent::Stopped(container_id) => {
                 // Log container stop but don't remove from Homarr
                 // (apps may restart, user can remove manually if needed)
-                if let Some(app) = state.discovered_apps.get(&container_id) {
+                // Note: We now track by URL, so we search by container_id in values
+                let stopped_app = state
+                    .discovered_apps
+                    .values()
+                    .find(|a| a.container_id == container_id);
+                if let Some(app) = stopped_app {
                     info!("Container stopped: {} (keeping in Homarr)", app.name);
                 }
             }
@@ -242,21 +248,19 @@ async fn run_sync(config: &Config) -> Result<()> {
         vec![]
     });
 
-    // Add new apps
+    // Add new apps (use URL as key for deduplication)
     for app in &discovered {
-        if !state.discovered_apps.contains_key(&app.container_id)
-            && !state.is_removed(&app.container_id)
-        {
+        if !state.discovered_apps.contains_key(&app.url) && !state.is_removed(&app.url) {
             match client
                 .add_discovered_app(app, &branding.board.name, Some(&existing_apps))
                 .await
             {
                 Ok(_) => {
                     state.discovered_apps.insert(
-                        app.container_id.clone(),
+                        app.url.clone(),
                         state::DiscoveredApp {
                             name: app.name.clone(),
-                            url: app.url.clone(),
+                            container_id: app.container_id.clone(),
                             added_at: chrono::Utc::now(),
                         },
                     );
@@ -311,12 +315,12 @@ async fn check_status(config: &Config) -> Result<()> {
         println!("Status: First-boot setup completed");
         println!("Last sync: {:?}", state.last_sync);
         println!("Discovered apps: {}", state.discovered_apps.len());
-        for (id, app) in &state.discovered_apps {
+        for (url, app) in &state.discovered_apps {
             println!(
                 "  - {} ({}) [{}]",
                 app.name,
-                app.url,
-                &id[..12.min(id.len())]
+                url,
+                &app.container_id[..12.min(app.container_id.len())]
             );
         }
     } else {

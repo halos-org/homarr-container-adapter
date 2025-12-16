@@ -100,6 +100,17 @@ pub struct SelectableApp {
 /// Default icon path (relative URL)
 const DEFAULT_ICON: &str = "/icons/docker.svg";
 
+/// Check if a board already has an item for a given app ID.
+/// Used to prevent duplicate board items when the same app is synced multiple times.
+fn board_has_app(items: &[serde_json::Value], app_id: &str) -> bool {
+    items.iter().any(|item| {
+        item.get("options")
+            .and_then(|o| o.get("appId"))
+            .and_then(|a| a.as_str())
+            == Some(app_id)
+    })
+}
+
 /// Transform icon paths to relative URLs for Homarr.
 ///
 /// Icons are served by Homarr's nginx from /icons/ which maps to /usr/share/pixmaps.
@@ -639,13 +650,27 @@ impl HomarrClient {
         Ok(app_id)
     }
 
-    /// Add a discovered app to a board with auto-positioning
+    /// Add a discovered app to a board with auto-positioning.
+    /// Skips adding if the app is already on the board (prevents duplicates).
     async fn add_discovered_app_to_board(
         &self,
         app_id: &str,
         app: &DiscoveredApp,
         board_name: &str,
     ) -> Result<()> {
+        // Get existing items first to check for duplicates
+        let board_items = self.get_board_items(board_name).await.unwrap_or_default();
+
+        // Check if this app is already on the board (prevents duplicate tiles)
+        if board_has_app(&board_items, app_id) {
+            tracing::info!(
+                "App '{}' already on board '{}', skipping board item creation",
+                app.name,
+                board_name
+            );
+            return Ok(());
+        }
+
         // Get current board state
         let board = self.get_board_by_name(board_name).await?;
 
@@ -660,8 +685,6 @@ impl HomarrClient {
             .map(|l| l.id.clone())
             .unwrap_or_default();
 
-        // Get existing items to find next available position
-        let board_items = self.get_board_items(board_name).await.unwrap_or_default();
         let (x_offset, y_offset) = self.find_next_position(&board_items, 10); // 10 columns
 
         let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
@@ -1024,5 +1047,49 @@ mod tests {
         // Edge case: pixmaps path with trailing slash but no filename
         let result = transform_icon_url("/usr/share/pixmaps/");
         assert_eq!(result, "/icons/docker.svg");
+    }
+
+    // Tests for board item deduplication (issue #15)
+
+    #[test]
+    fn test_board_has_app_finds_existing() {
+        let items = vec![
+            json!({
+                "id": "discovered-abc123",
+                "kind": "app",
+                "options": {
+                    "appId": "app-xyz-123"
+                }
+            }),
+            json!({
+                "id": "discovered-def456",
+                "kind": "app",
+                "options": {
+                    "appId": "app-other-456"
+                }
+            }),
+        ];
+
+        assert!(board_has_app(&items, "app-xyz-123"));
+        assert!(board_has_app(&items, "app-other-456"));
+        assert!(!board_has_app(&items, "app-nonexistent"));
+    }
+
+    #[test]
+    fn test_board_has_app_handles_empty_board() {
+        let items: Vec<serde_json::Value> = vec![];
+        assert!(!board_has_app(&items, "any-app-id"));
+    }
+
+    #[test]
+    fn test_board_has_app_handles_malformed_items() {
+        let items = vec![
+            json!({"id": "item-without-options"}),
+            json!({"id": "item-with-empty-options", "options": {}}),
+            json!({"id": "item-with-null-appid", "options": {"appId": null}}),
+        ];
+
+        // Should not crash and should return false for all
+        assert!(!board_has_app(&items, "any-app-id"));
     }
 }

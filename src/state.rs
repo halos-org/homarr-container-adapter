@@ -36,10 +36,13 @@ fn default_version() -> String {
     "1.0".to_string()
 }
 
+/// Discovered app metadata stored in state.
+/// Note: The HashMap key is the app URL (stable identifier).
+/// Container ID is stored for reference but not used as key since it changes on container restart.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiscoveredApp {
     pub name: String,
-    pub url: String,
+    pub container_id: String,
     pub added_at: DateTime<Utc>,
 }
 
@@ -177,5 +180,75 @@ mod tests {
         let result = state.save(&nested_path);
         assert!(result.is_ok());
         assert!(nested_path.exists());
+    }
+
+    // Tests for URL-based deduplication (issue #15)
+
+    #[test]
+    fn test_discovered_apps_keyed_by_url() {
+        let mut state = State::default();
+        let url = "http://localhost:3000".to_string();
+
+        state.discovered_apps.insert(
+            url.clone(),
+            DiscoveredApp {
+                name: "Signal K".to_string(),
+                container_id: "abc123".to_string(),
+                added_at: Utc::now(),
+            },
+        );
+
+        // Should find by URL
+        assert!(state.discovered_apps.contains_key(&url));
+        // Should NOT find by container_id (that's not the key anymore)
+        assert!(!state.discovered_apps.contains_key("abc123"));
+    }
+
+    #[test]
+    fn test_same_url_different_container_id_no_duplicate() {
+        let mut state = State::default();
+        let url = "http://localhost:3000".to_string();
+
+        // First container with this URL
+        state.discovered_apps.insert(
+            url.clone(),
+            DiscoveredApp {
+                name: "Signal K".to_string(),
+                container_id: "abc123".to_string(),
+                added_at: Utc::now(),
+            },
+        );
+
+        // Same URL, different container (after restart)
+        // This should update, not create duplicate
+        state.discovered_apps.insert(
+            url.clone(),
+            DiscoveredApp {
+                name: "Signal K".to_string(),
+                container_id: "def456".to_string(),
+                added_at: Utc::now(),
+            },
+        );
+
+        // Should have exactly one entry
+        assert_eq!(state.discovered_apps.len(), 1);
+        // Should have the new container_id
+        assert_eq!(
+            state.discovered_apps.get(&url).unwrap().container_id,
+            "def456"
+        );
+    }
+
+    #[test]
+    fn test_removed_apps_tracked_by_url() {
+        let mut state = State::default();
+        let url = "http://localhost:3000";
+
+        assert!(!state.is_removed(url));
+        state.mark_removed(url);
+        assert!(state.is_removed(url));
+
+        // Different container ID with same URL should still be considered removed
+        // (we track by URL, not container_id)
     }
 }
