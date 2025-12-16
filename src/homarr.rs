@@ -331,8 +331,14 @@ impl HomarrClient {
         }
 
         // Add theme settings
-        settings.insert("primaryColor".to_string(), json!(branding.theme.primary_color));
-        settings.insert("secondaryColor".to_string(), json!(branding.theme.secondary_color));
+        settings.insert(
+            "primaryColor".to_string(),
+            json!(branding.theme.primary_color),
+        );
+        settings.insert(
+            "secondaryColor".to_string(),
+            json!(branding.theme.secondary_color),
+        );
         settings.insert("opacity".to_string(), json!(branding.theme.opacity));
         settings.insert("itemRadius".to_string(), json!(branding.theme.item_radius));
 
