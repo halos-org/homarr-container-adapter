@@ -545,7 +545,8 @@ impl HomarrClient {
                 "name": app.name,
                 "description": app.description.clone().unwrap_or_default(),
                 "iconUrl": icon_url,
-                "href": app.url
+                "href": app.url,
+                "pingUrl": ""
             }
         });
 
