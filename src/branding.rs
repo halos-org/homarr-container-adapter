@@ -21,7 +21,22 @@ pub struct BrandingConfig {
 #[allow(dead_code)]
 pub struct Identity {
     pub product_name: String,
-    pub logo_path: String,
+    /// Browser tab title
+    #[serde(default)]
+    pub page_title: Option<String>,
+    /// Meta title for SEO
+    #[serde(default)]
+    pub meta_title: Option<String>,
+    /// Logo URL served via /branding/ prefix
+    #[serde(default)]
+    pub logo_image_url: Option<String>,
+    /// Favicon URL served via /branding/ prefix
+    #[serde(default)]
+    pub favicon_image_url: Option<String>,
+    /// Legacy logo path (backwards compatibility)
+    #[serde(default)]
+    pub logo_path: Option<String>,
+    /// Legacy favicon path (backwards compatibility)
     #[serde(default)]
     pub favicon_path: Option<String>,
 }

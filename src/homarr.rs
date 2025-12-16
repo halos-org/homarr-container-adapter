@@ -279,6 +279,10 @@ impl HomarrClient {
             self.create_board(branding).await?
         };
 
+        // Apply board branding settings (page title, logo, colors, etc.)
+        self.save_board_branding_settings(&board_id, branding)
+            .await?;
+
         // Create Cockpit app if it doesn't exist
         if branding.board.cockpit.enabled {
             self.ensure_cockpit_app(branding, &board_id).await?;
@@ -290,6 +294,64 @@ impl HomarrClient {
         // Set color scheme
         self.set_color_scheme(&branding.theme.default_color_scheme)
             .await?;
+
+        Ok(())
+    }
+
+    /// Save board branding settings (page title, meta title, logo, favicon, colors)
+    async fn save_board_branding_settings(
+        &self,
+        board_id: &str,
+        branding: &BrandingConfig,
+    ) -> Result<()> {
+        let url = format!("{}/api/trpc/board.savePartialBoardSettings", self.base_url);
+
+        // Build the settings payload with only non-null values
+        let mut settings = serde_json::Map::new();
+        settings.insert("id".to_string(), json!(board_id));
+
+        // Add page title if configured
+        if let Some(ref page_title) = branding.identity.page_title {
+            settings.insert("pageTitle".to_string(), json!(page_title));
+        }
+
+        // Add meta title if configured
+        if let Some(ref meta_title) = branding.identity.meta_title {
+            settings.insert("metaTitle".to_string(), json!(meta_title));
+        }
+
+        // Add logo URL if configured
+        if let Some(ref logo_url) = branding.identity.logo_image_url {
+            settings.insert("logoImageUrl".to_string(), json!(logo_url));
+        }
+
+        // Add favicon URL if configured
+        if let Some(ref favicon_url) = branding.identity.favicon_image_url {
+            settings.insert("faviconImageUrl".to_string(), json!(favicon_url));
+        }
+
+        // Add theme settings
+        settings.insert(
+            "primaryColor".to_string(),
+            json!(branding.theme.primary_color),
+        );
+        settings.insert(
+            "secondaryColor".to_string(),
+            json!(branding.theme.secondary_color),
+        );
+        settings.insert("opacity".to_string(), json!(branding.theme.opacity));
+        settings.insert("itemRadius".to_string(), json!(branding.theme.item_radius));
+
+        let payload = json!({ "json": settings });
+
+        tracing::info!("Applying board branding settings");
+        let response = self.client.post(&url).json(&payload).send().await?;
+
+        if !response.status().is_success() {
+            let text = response.text().await?;
+            tracing::warn!("Failed to save board branding settings: {}", text);
+            // Don't fail the whole setup if branding settings fail
+        }
 
         Ok(())
     }
