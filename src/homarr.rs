@@ -385,6 +385,16 @@ impl HomarrClient {
         settings.insert("opacity".to_string(), json!(branding.theme.opacity));
         settings.insert("itemRadius".to_string(), json!(branding.theme.item_radius));
 
+        // Add background image URL if configured
+        if let Some(ref bg_url) = branding.theme.background_image_url {
+            settings.insert("backgroundImageUrl".to_string(), json!(bg_url));
+        }
+
+        // Add custom CSS if configured
+        if let Some(ref custom_css) = branding.theme.custom_css {
+            settings.insert("customCss".to_string(), json!(custom_css));
+        }
+
         let payload = json!({ "json": settings });
 
         tracing::info!("Applying board branding settings");

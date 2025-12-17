@@ -51,6 +51,12 @@ pub struct Theme {
     pub item_radius: String,
     #[serde(default = "default_opacity")]
     pub opacity: u8,
+    /// Background image URL served via /branding/ prefix
+    #[serde(default)]
+    pub background_image_url: Option<String>,
+    /// Custom CSS to inject into the dashboard
+    #[serde(default)]
+    pub custom_css: Option<String>,
 }
 
 fn default_item_radius() -> String {
