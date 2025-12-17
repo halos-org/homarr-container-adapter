@@ -47,7 +47,7 @@ Containers opt-in to Homarr visibility using labels:
 | `homarr.icon` | No | Icon URL |
 | `homarr.category` | No | Category grouping |
 
-**Note:** The `pingUrl` for health checks is automatically derived by replacing the hostname with `localhost`. This allows Homarr (running in a container) to reach apps for health checks while the display URL can use the external hostname (e.g., `halos.local`).
+**Note:** The `pingUrl` for health checks is automatically derived by replacing the hostname with `host.docker.internal`. This allows Homarr (running in a container) to reach apps on the host for health checks while the display URL can use the external hostname (e.g., `halos.local`). Requires `extra_hosts: ["host.docker.internal:host-gateway"]` in Homarr's docker-compose.yml.
 
 Example:
 ```yaml
