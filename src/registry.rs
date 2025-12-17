@@ -33,11 +33,6 @@ pub struct AppDefinition {
     /// Category for grouping (e.g., "Marine", "System")
     pub category: Option<String>,
 
-    /// Priority for placement order (lower = placed first, default: 50)
-    /// Ranges: 00-19 system, 20-39 primary, 40-59 default, 60-79 utility, 80-99 external
-    #[serde(default = "default_priority")]
-    pub priority: u8,
-
     /// App type classification
     #[serde(rename = "type", default)]
     pub app_type: AppType,
@@ -45,12 +40,9 @@ pub struct AppDefinition {
     /// Optional override for ping URL (health checks)
     pub ping_url: Option<String>,
 
-    /// Optional board layout configuration
-    pub layout: Option<LayoutConfig>,
-}
-
-fn default_priority() -> u8 {
-    50
+    /// Board layout configuration (includes priority)
+    #[serde(default)]
+    pub layout: LayoutConfig,
 }
 
 /// App type - determines how health checks work
@@ -67,6 +59,11 @@ pub struct AppType {
 /// Board layout configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct LayoutConfig {
+    /// Priority for placement order (lower = placed first, default: 50)
+    /// Ranges: 00-19 system, 20-39 primary, 40-59 default, 60-79 utility, 80-99 external
+    #[serde(default = "default_priority")]
+    pub priority: u8,
+
     /// Width in grid columns (default: 1)
     #[serde(default = "default_size")]
     pub width: u8,
@@ -84,6 +81,10 @@ pub struct LayoutConfig {
     pub y_offset: Option<u8>,
 }
 
+fn default_priority() -> u8 {
+    50
+}
+
 fn default_size() -> u8 {
     1
 }
@@ -91,6 +92,7 @@ fn default_size() -> u8 {
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
+            priority: 50,
             width: 1,
             height: 1,
             x_offset: None,
@@ -127,9 +129,15 @@ impl AppDefinition {
         self.app_type.container_name.as_deref()
     }
 
-    /// Get effective layout (returns default if not specified)
-    pub fn effective_layout(&self) -> LayoutConfig {
-        self.layout.clone().unwrap_or_default()
+    /// Get the layout configuration
+    pub fn effective_layout(&self) -> &LayoutConfig {
+        &self.layout
+    }
+
+    /// Get priority for sorting (convenience method)
+    #[allow(dead_code)]
+    pub fn priority(&self) -> u8 {
+        self.layout.priority
     }
 }
 
@@ -179,7 +187,7 @@ pub fn load_all_apps<P: AsRef<Path>>(registry_dir: P) -> Result<Vec<RegistryEntr
     }
 
     // Sort by priority (lower = first)
-    entries.sort_by_key(|e| e.app.priority);
+    entries.sort_by_key(|e| e.app.layout.priority);
 
     tracing::info!(
         "Loaded {} apps from registry directory {:?}",
@@ -248,7 +256,7 @@ url = "http://localhost:8080"
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].app.name, "Test App");
         assert_eq!(entries[0].app.url, "http://localhost:8080");
-        assert_eq!(entries[0].app.priority, 50); // default
+        assert_eq!(entries[0].app.priority(), 50); // default
         assert!(!entries[0].app.is_container());
         assert!(!entries[0].app.is_external());
     }
@@ -265,12 +273,12 @@ url = "http://halos.local:3000"
 description = "Marine data server"
 icon_url = "/icons/signalk.png"
 category = "Marine"
-priority = 25
 
 [type]
 container_name = "signalk-server"
 
 [layout]
+priority = 25
 width = 2
 height = 2
 x_offset = 0
@@ -283,11 +291,12 @@ y_offset = 0
 
         let app = &entries[0].app;
         assert_eq!(app.name, "Signal K");
-        assert_eq!(app.priority, 25);
+        assert_eq!(app.priority(), 25);
         assert!(app.is_container());
         assert_eq!(app.container_name(), Some("signalk-server"));
 
         let layout = app.effective_layout();
+        assert_eq!(layout.priority, 25);
         assert_eq!(layout.width, 2);
         assert_eq!(layout.height, 2);
         assert_eq!(layout.x_offset, Some(0));
@@ -303,10 +312,12 @@ y_offset = 0
             r#"
 name = "Documentation"
 url = "https://docs.example.com"
-priority = 85
 
 [type]
 external = true
+
+[layout]
+priority = 85
 "#,
         );
 
@@ -314,6 +325,7 @@ external = true
         assert_eq!(entries.len(), 1);
         assert!(entries[0].app.is_external());
         assert!(!entries[0].app.is_container());
+        assert_eq!(entries[0].app.priority(), 85);
     }
 
     #[test]
@@ -326,6 +338,8 @@ external = true
             r#"
 name = "App C"
 url = "http://localhost:3"
+
+[layout]
 priority = 50
 "#,
         );
@@ -336,6 +350,8 @@ priority = 50
             r#"
 name = "App A"
 url = "http://localhost:1"
+
+[layout]
 priority = 10
 "#,
         );
@@ -346,6 +362,8 @@ priority = 10
             r#"
 name = "App B"
 url = "http://localhost:2"
+
+[layout]
 priority = 25
 "#,
         );
