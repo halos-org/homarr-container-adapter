@@ -6,7 +6,6 @@
 
 mod branding;
 mod config;
-mod docker;
 mod error;
 mod homarr;
 mod registry;

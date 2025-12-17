@@ -10,9 +10,6 @@ pub enum AdapterError {
     #[error("Homarr API error: {0}")]
     HomarrApi(String),
 
-    #[error("Docker error: {0}")]
-    Docker(String),
-
     #[error("State file error: {0}")]
     State(String),
 

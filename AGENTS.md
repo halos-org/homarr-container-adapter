@@ -2,15 +2,15 @@
 
 ## Repository Purpose
 
-Rust service that bridges Docker containers with the Homarr dashboard. Two main functions:
+Rust service that bridges app definitions with the Homarr dashboard. Two main functions:
 1. First-boot setup: Complete Homarr onboarding with HaLOS branding
-2. Container sync: Auto-discover containers with `homarr.*` labels
+2. App registry sync: Sync apps from `/etc/halos/webapps.d/*.toml` to Homarr
 
 ## Key Files
 
 - `src/main.rs` - CLI entry point with setup/sync/status commands
 - `src/homarr.rs` - Homarr tRPC API client
-- `src/docker.rs` - Docker container discovery (bollard)
+- `src/registry.rs` - App registry loader (TOML files)
 - `src/branding.rs` - Parse branding.toml from halos-homarr-branding
 - `src/state.rs` - Persistent state (JSON)
 - `src/config.rs` - Adapter configuration
@@ -25,15 +25,19 @@ Rust service that bridges Docker containers with the Homarr dashboard. Two main 
 - Session-based auth (cookies), not API keys for mutations
 - Onboarding flow: start → user → settings → finish
 
-### Docker Labels
-Containers opt-in with `homarr.enable=true` plus:
-- `homarr.name` (required)
-- `homarr.url` (required)
-- `homarr.description`, `homarr.icon`, `homarr.category` (optional)
+### App Registry
+Apps are defined in `/etc/halos/webapps.d/*.toml` files with:
+- `name` (required) - Display name
+- `url` (required) - App URL (validated)
+- `description`, `icon_url`, `category` (optional)
+- `[layout]` section for position/size: `priority`, `width`, `height`, `x_offset`, `y_offset`
+
+Priority ranges: 00-09 (system), 10-29 (core), 30-49 (marine), 50-69 (user), 70-99 (external)
+
+Note: If only one of `x_offset`/`y_offset` is specified, both are auto-calculated.
 
 ### Dependencies
 - `reqwest` with cookies for HTTP
-- `bollard` for Docker API
 - `tokio` async runtime
 - `clap` for CLI
 

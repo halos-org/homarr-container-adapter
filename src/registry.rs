@@ -7,6 +7,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 use crate::error::{AdapterError, Result};
 
@@ -218,6 +219,11 @@ fn load_app_file<P: AsRef<Path>>(path: P) -> Result<AppDefinition> {
             path
         )));
     }
+
+    // Validate URL format
+    Url::parse(&app.url).map_err(|e| {
+        AdapterError::Config(format!("Invalid URL '{}' in {:?}: {}", app.url, path, e))
+    })?;
 
     Ok(app)
 }
@@ -439,5 +445,35 @@ url = "http://localhost:1"
 
         let entries = load_all_apps(dir.path()).unwrap();
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_invalid_url_rejected() {
+        let dir = TempDir::new().unwrap();
+
+        // Invalid URL (not a valid URL format)
+        create_test_app_file(
+            dir.path(),
+            "invalid-url",
+            r#"
+name = "Invalid URL App"
+url = "not-a-valid-url"
+"#,
+        );
+
+        // Valid app
+        create_test_app_file(
+            dir.path(),
+            "valid",
+            r#"
+name = "Valid App"
+url = "http://localhost:8080"
+"#,
+        );
+
+        let entries = load_all_apps(dir.path()).unwrap();
+        // Only valid file should be loaded (invalid URL is skipped)
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].app.name, "Valid App");
     }
 }
