@@ -37,8 +37,9 @@ clap = { version = "4", features = ["derive"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
-# URL encoding
+# URL encoding and parsing
 urlencoding = "2"
+url = "2"
 
 [dev-dependencies]
 tokio-test = "0.4"
