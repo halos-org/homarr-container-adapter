@@ -60,6 +60,33 @@ cargo build --release
 cargo test
 ```
 
+## Development
+
+### Pre-commit Hooks
+
+This project uses [lefthook](https://github.com/evilmartians/lefthook) for pre-commit hooks to run format and lint checks locally before commits.
+
+**Setup:**
+
+```bash
+# Install lefthook (one-time)
+brew install lefthook
+
+# Enable hooks in this repo
+./run hooks-install
+```
+
+**What it checks:**
+
+- `cargo fmt --check` - Code formatting
+- `cargo clippy --all-targets --all-features -- -D warnings` - Linting
+
+**Skip hooks when needed:**
+
+```bash
+git commit --no-verify -m "WIP: message"
+```
+
 ## Related Packages
 
 - `homarr-container` - Homarr dashboard container
