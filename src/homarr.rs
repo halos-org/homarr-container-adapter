@@ -433,16 +433,25 @@ impl HomarrClient {
     async fn ensure_cockpit_app(&self, branding: &BrandingConfig, board_id: &str) -> Result<()> {
         let cockpit = &branding.board.cockpit;
 
+        // Check if Cockpit app already exists (by URL)
+        let existing_apps = self.get_all_apps().await.unwrap_or_default();
+        if let Some(existing) = Self::find_app_in_list(&existing_apps, &cockpit.href) {
+            tracing::info!("Cockpit app already exists (app_id: {}), skipping creation", existing.id);
+            return Ok(());
+        }
+
         // Create app with transformed icon URL
         let url = format!("{}/api/trpc/app.create", self.base_url);
         let icon_url = transform_icon_url(&cockpit.icon_url);
+        // Auto-derive pingUrl with localhost for container-to-container health checks
+        let ping_url = derive_ping_url(&cockpit.href);
         let payload = json!({
             "json": {
                 "name": cockpit.name,
                 "description": cockpit.description,
                 "iconUrl": icon_url,
                 "href": cockpit.href,
-                "pingUrl": null
+                "pingUrl": ping_url
             }
         });
 
