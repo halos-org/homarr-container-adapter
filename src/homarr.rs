@@ -100,6 +100,22 @@ pub struct SelectableApp {
 /// Default icon path (relative URL)
 const DEFAULT_ICON: &str = "/icons/docker.svg";
 
+/// Derive a localhost-based ping URL from the app URL.
+/// Replaces the hostname with localhost so Homarr container can reach the app.
+/// Example: "http://halos.local:3000/path" -> "http://localhost:3000/path"
+fn derive_ping_url(app_url: &str) -> Option<String> {
+    match url::Url::parse(app_url) {
+        Ok(mut parsed) => {
+            if parsed.set_host(Some("localhost")).is_ok() {
+                Some(parsed.to_string())
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
+
 /// Check if a board already has an item for a given app ID.
 /// Used to prevent duplicate board items when the same app is synced multiple times.
 fn board_has_app(items: &[serde_json::Value], app_id: &str) -> bool {
@@ -549,6 +565,8 @@ impl HomarrClient {
     async fn update_app(&self, app_id: &str, app: &DiscoveredApp) -> Result<()> {
         let url = format!("{}/api/trpc/app.update", self.base_url);
         let icon_url = transform_icon_url(app.icon_url.as_deref().unwrap_or(DEFAULT_ICON));
+        // Auto-derive pingUrl with localhost for container-to-container health checks
+        let ping_url = derive_ping_url(&app.url).unwrap_or_default();
 
         let payload = json!({
             "json": {
@@ -557,7 +575,7 @@ impl HomarrClient {
                 "description": app.description.clone().unwrap_or_default(),
                 "iconUrl": icon_url,
                 "href": app.url,
-                "pingUrl": ""
+                "pingUrl": ping_url
             }
         });
 
@@ -618,6 +636,8 @@ impl HomarrClient {
         let url = format!("{}/api/trpc/app.create", self.base_url);
         // Transform icon path and use default if not specified
         let icon_url = transform_icon_url(app.icon_url.as_deref().unwrap_or(DEFAULT_ICON));
+        // Auto-derive pingUrl with localhost for container-to-container health checks
+        let ping_url = derive_ping_url(&app.url);
 
         let payload = json!({
             "json": {
@@ -625,7 +645,7 @@ impl HomarrClient {
                 "description": app.description.clone().unwrap_or_default(),
                 "iconUrl": icon_url,
                 "href": app.url,
-                "pingUrl": null
+                "pingUrl": ping_url
             }
         });
 
@@ -1091,5 +1111,37 @@ mod tests {
 
         // Should not crash and should return false for all
         assert!(!board_has_app(&items, "any-app-id"));
+    }
+
+    // Tests for derive_ping_url (auto-derive localhost URL for health checks)
+
+    #[test]
+    fn test_derive_ping_url_replaces_hostname() {
+        let result = derive_ping_url("http://halos.local:3000");
+        assert_eq!(result, Some("http://localhost:3000/".to_string()));
+    }
+
+    #[test]
+    fn test_derive_ping_url_preserves_path() {
+        let result = derive_ping_url("http://halos.local:8086/api/v2");
+        assert_eq!(result, Some("http://localhost:8086/api/v2".to_string()));
+    }
+
+    #[test]
+    fn test_derive_ping_url_preserves_https() {
+        let result = derive_ping_url("https://halos.local:443/app");
+        assert_eq!(result, Some("https://localhost/app".to_string()));
+    }
+
+    #[test]
+    fn test_derive_ping_url_handles_no_port() {
+        let result = derive_ping_url("http://halos.local/dashboard");
+        assert_eq!(result, Some("http://localhost/dashboard".to_string()));
+    }
+
+    #[test]
+    fn test_derive_ping_url_invalid_url_returns_none() {
+        let result = derive_ping_url("not-a-valid-url");
+        assert_eq!(result, None);
     }
 }

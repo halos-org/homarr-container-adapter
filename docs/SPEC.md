@@ -42,10 +42,12 @@ Containers opt-in to Homarr visibility using labels:
 |-------|----------|-------------|
 | `homarr.enable` | Yes | Must be "true" to enable |
 | `homarr.name` | Yes | Display name in Homarr |
-| `homarr.url` | Yes | URL to access the app |
+| `homarr.url` | Yes | URL to access the app (used for clicking) |
 | `homarr.description` | No | App description |
 | `homarr.icon` | No | Icon URL |
 | `homarr.category` | No | Category grouping |
+
+**Note:** The `pingUrl` for health checks is automatically derived by replacing the hostname with `localhost`. This allows Homarr (running in a container) to reach apps for health checks while the display URL can use the external hostname (e.g., `halos.local`).
 
 Example:
 ```yaml
