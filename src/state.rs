@@ -19,6 +19,10 @@ pub struct State {
     #[serde(default)]
     pub first_boot_completed: bool,
 
+    /// Whether Authelia credential sync has been completed
+    #[serde(default)]
+    pub authelia_sync_completed: bool,
+
     /// Apps that the user has removed from Homarr (don't re-add)
     #[serde(default)]
     pub removed_apps: HashSet<String>,

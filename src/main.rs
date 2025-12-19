@@ -4,6 +4,7 @@
 //! - First-boot setup: Completes Homarr onboarding with HaLOS branding
 //! - App registry: Syncs apps from /etc/halos/webapps.d/ to Homarr dashboard
 
+mod authelia;
 mod branding;
 mod config;
 mod error;
@@ -174,12 +175,60 @@ async fn run_setup(config: &Config) -> Result<()> {
     info!("Setting up default board");
     client.setup_default_board(&branding).await?;
 
-    // Mark first boot complete
+    // Load state to check if Authelia sync is needed
     let mut state = state::State::load(&config.state_file).unwrap_or_default();
+
+    // Sync credentials to Authelia if not already done
+    if !state.authelia_sync_completed {
+        sync_authelia_credentials(config, &branding, &mut state)?;
+    }
+
+    // Mark first boot complete
     state.first_boot_completed = true;
     state.save(&config.state_file)?;
 
     info!("First-boot setup complete");
+    Ok(())
+}
+
+/// Sync credentials from branding to Authelia user database
+fn sync_authelia_credentials(
+    config: &Config,
+    branding: &branding::BrandingConfig,
+    state: &mut state::State,
+) -> Result<()> {
+    use std::path::Path;
+
+    let db_path = Path::new(&config.authelia_users_db);
+
+    // Only sync if the parent directory exists (Authelia is installed)
+    if let Some(parent) = db_path.parent() {
+        if parent.exists() {
+            info!("Authelia detected, syncing credentials");
+
+            match authelia::sync_credentials(
+                db_path,
+                &branding.credentials.admin_username,
+                &branding.credentials.admin_password,
+                None, // Use default email
+            ) {
+                Ok(()) => {
+                    state.authelia_sync_completed = true;
+                    info!("Authelia credential sync completed");
+                }
+                Err(e) => {
+                    warn!("Failed to sync Authelia credentials: {}", e);
+                    // Don't fail setup if Authelia sync fails
+                }
+            }
+        } else {
+            info!(
+                "Authelia not installed (directory {} does not exist), skipping credential sync",
+                parent.display()
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -188,6 +237,14 @@ async fn check_status(config: &Config) -> Result<()> {
 
     if state.first_boot_completed {
         println!("Status: First-boot setup completed");
+        println!(
+            "Authelia sync: {}",
+            if state.authelia_sync_completed {
+                "completed"
+            } else {
+                "not completed"
+            }
+        );
         println!("Last sync: {:?}", state.last_sync);
         println!("Registered apps: {}", state.discovered_apps.len());
         for (url, app) in &state.discovered_apps {
