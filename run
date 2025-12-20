@@ -197,7 +197,7 @@ function status {
 ################################################################################
 # Development Commands
 
-function hooks-install {
+function install-hooks {
   #@ Install git pre-commit hooks (lefthook)
   #@ Category: Development
   echo "Installing git hooks..."
