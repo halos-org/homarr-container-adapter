@@ -30,6 +30,10 @@ pub struct Config {
     #[serde(default = "default_registry_dir")]
     pub registry_dir: String,
 
+    /// Path to Authelia users database file
+    #[serde(default = "default_authelia_users_db")]
+    pub authelia_users_db: String,
+
     /// Enable debug logging
     #[serde(default)]
     pub debug: bool,
@@ -63,6 +67,10 @@ fn default_registry_dir() -> String {
     "/etc/halos/webapps.d".to_string()
 }
 
+fn default_authelia_users_db() -> String {
+    "/var/lib/container-apps/authelia-container/data/users_database.yml".to_string()
+}
+
 fn default_sync_interval() -> u64 {
     300 // 5 minutes
 }
@@ -79,6 +87,7 @@ impl Default for Config {
             state_file: default_state_file(),
             docker_socket: default_docker_socket(),
             registry_dir: default_registry_dir(),
+            authelia_users_db: default_authelia_users_db(),
             debug: false,
             sync_interval: default_sync_interval(),
             startup_delay: default_startup_delay(),
