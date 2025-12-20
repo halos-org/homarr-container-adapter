@@ -7,10 +7,9 @@ Wants=docker.service
 After=homarr-container.service
 
 [Service]
-Type=simple
-ExecStart=/usr/bin/homarr-container-adapter watch
-Restart=on-failure
-RestartSec=10
+Type=oneshot
+ExecStart=/usr/bin/homarr-container-adapter sync
+RemainAfterExit=yes
 
 # Security hardening
 NoNewPrivileges=true

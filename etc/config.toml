@@ -6,9 +6,9 @@
 # Most settings have sensible defaults and don't need to be specified.
 # Uncomment and modify only if you need to override the defaults.
 
-# Homarr API URL (internal, container-to-container)
-# Default: http://localhost:80
-# homarr_url = "http://localhost:80"
+# Homarr API URL (direct connection to container port)
+# Default: http://localhost:7575
+homarr_url = "http://localhost:7575"
 
 # Path to branding configuration
 # Default: /etc/halos-homarr-branding/branding.toml

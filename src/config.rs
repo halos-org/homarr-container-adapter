@@ -36,7 +36,7 @@ pub struct Config {
 }
 
 fn default_homarr_url() -> String {
-    "http://localhost:80".to_string()
+    "http://localhost:7575".to_string()
 }
 
 fn default_branding_file() -> String {
