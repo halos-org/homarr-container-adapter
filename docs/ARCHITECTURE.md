@@ -25,10 +25,13 @@
 │                          └──────────────────────────────────┘  │
 │                                                                  │
 │  ┌──────────────────┐    ┌──────────────────────────────────┐  │
-│  │ homarr-branding- │    │  State File                      │  │
-│  │ halos            │    │  /var/lib/homarr-container-      │  │
+│  │ halos-homarr-    │    │  State File                      │  │
+│  │ branding         │    │  /var/lib/homarr-container-      │  │
 │  │                  │    │  adapter/state.json              │  │
-│  │ - branding.toml  │    └──────────────────────────────────┘  │
+│  │ - branding.toml  │    │  - api_key (permanent)           │  │
+│  │ - bootstrap-api- │    │  - first_boot_completed          │  │
+│  │   key            │    │  - discovered_apps               │  │
+│  │ - db-seed.sqlite │    └──────────────────────────────────┘  │
 │  │ - logo.svg       │                                          │
 │  └──────────────────┘                                          │
 └─────────────────────────────────────────────────────────────────┘
@@ -66,8 +69,9 @@ src/
 - Validation of branding settings
 
 #### homarr.rs
-- HTTP client with cookie-based sessions
+- HTTP client with API key authentication
 - tRPC API wrapper functions
+- API key rotation (bootstrap → permanent)
 - Onboarding flow automation
 - Board and app management
 
@@ -79,6 +83,7 @@ src/
 #### state.rs
 - JSON state persistence
 - First-boot completion tracking
+- API key storage (permanent key after rotation)
 - Removed apps tracking
 - Sync timestamp management
 
@@ -99,21 +104,26 @@ src/
                      │
                      ▼
               ┌──────────────┐
-              │   branding   │
-              │    config    │
+              │  branding +  │
+              │ bootstrap-   │
+              │ api-key      │
               └──────────────┘
 
 1. Load branding configuration
-2. Check if first_boot_completed in state
-3. If not completed:
-   a. Wait for Homarr to be ready
-   b. Complete onboarding wizard
-   c. Create admin user
-   d. Configure settings
-   e. Create board with Cockpit tile
-   f. Set as home board
-   g. Mark first_boot_completed = true
-4. Save state
+2. Check if permanent API key exists in state
+3. If no permanent key (first boot):
+   a. Read bootstrap API key from halos-homarr-branding package
+   b. Use bootstrap key to create new permanent API key
+   c. Delete bootstrap key from Homarr
+   d. Store permanent key in state
+4. Check onboarding status (should be complete from seed database)
+5. If onboarding not complete:
+   a. Complete onboarding wizard
+   b. Configure settings
+6. Create/update board with branding
+7. Sync Authelia credentials if needed
+8. Mark first_boot_completed = true
+9. Save state
 ```
 
 ### Container Sync Flow
@@ -176,14 +186,19 @@ src/
 
 1. **File Permissions**
    - Config files: root:root 644
-   - Branding with credentials: root:root 600
-   - State file: root:root 600
+   - Bootstrap API key: root:root 600
+   - State file (contains permanent API key): root:root 600
 
-2. **Network**
+2. **Authentication**
+   - API key authentication (no credentials login)
+   - Bootstrap key rotated on first boot (minimal exposure window)
+   - Homarr runs with AUTH_PROVIDERS="oidc" only
+
+3. **Network**
    - Localhost-only communication with Homarr
    - No external network access required
 
-3. **Docker Access**
+4. **Docker Access**
    - Read-only container listing
    - Requires docker group membership or root
 

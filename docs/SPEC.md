@@ -77,6 +77,18 @@ state_file = "/var/lib/homarr-container-adapter/state.json"
 # Docker socket path
 docker_socket = "/var/run/docker.sock"
 
+# Bootstrap API key file (from halos-homarr-branding package)
+bootstrap_api_key_file = "/etc/halos-homarr-branding/bootstrap-api-key"
+
+# Authelia users database file
+authelia_users_db = "/var/lib/container-apps/authelia-container/data/users_database.yml"
+
+# Periodic sync interval in seconds (for watch mode)
+sync_interval = 300
+
+# Startup delay in seconds before first sync (for watch mode)
+startup_delay = 10
+
 # Enable debug logging
 debug = false
 ```
@@ -95,9 +107,20 @@ The adapter uses Homarr's tRPC API (not REST). Key endpoints:
 - `POST /api/trpc/user.initUser` - Create initial user
 - `POST /api/trpc/serverSettings.initSettings` - Configure settings
 
-### Authentication
-- `GET /api/auth/csrf` - Get CSRF token
-- `POST /api/auth/callback/credentials` - Login with credentials
+### Authentication (API Key)
+
+The adapter uses API key authentication via the `Authorization: Bearer <api_key>` header.
+This allows Homarr to run with `AUTH_PROVIDERS="oidc"` (no credentials login).
+
+**API Key Rotation Flow (First Boot):**
+1. Read bootstrap API key from `/etc/halos-homarr-branding/bootstrap-api-key`
+2. Create new permanent API key via `POST /api/trpc/apiKeys.create`
+3. Delete bootstrap key via `POST /api/trpc/apiKeys.delete`
+4. Store permanent key in state file
+
+Key endpoints:
+- `POST /api/trpc/apiKeys.create` - Create new API key
+- `POST /api/trpc/apiKeys.delete` - Delete API key by ID
 
 ### Board Management
 - `GET /api/trpc/board.getBoardByName` - Get board by name
@@ -117,12 +140,14 @@ The adapter maintains state in a JSON file:
 {
   "version": "1.0",
   "first_boot_completed": true,
-  "removed_apps": ["container-id-1", "container-id-2"],
+  "authelia_sync_completed": true,
+  "api_key": "abc123.randomtoken...",
+  "removed_apps": ["http://localhost:3000"],
   "last_sync": "2025-01-15T10:30:00Z",
   "discovered_apps": {
-    "container-id": {
+    "http://localhost:3000": {
       "name": "Signal K",
-      "url": "http://localhost:3000",
+      "container_id": "abc123def456",
       "added_at": "2025-01-15T10:30:00Z"
     }
   }
@@ -155,6 +180,7 @@ Options:
 
 ## Security Considerations
 
-- Credentials stored in branding config (file permissions: 600)
-- Session cookies handled in-memory only
-- Docker socket access required (add to docker group)
+- **API Key Storage**: Permanent API key stored in state file (file permissions: 600)
+- **Bootstrap Key**: Well-known bootstrap key rotated on first boot (window of vulnerability: seconds)
+- **No Credentials Login**: Homarr runs with `AUTH_PROVIDERS="oidc"` only
+- **Docker Socket**: Access required (add to docker group)
