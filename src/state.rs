@@ -23,6 +23,12 @@ pub struct State {
     #[serde(default)]
     pub authelia_sync_completed: bool,
 
+    /// Homarr API key for authentication
+    /// Format: "{id}.{token}" (e.g., "abc123.randomtoken...")
+    /// This is rotated from the bootstrap key on first boot.
+    #[serde(default)]
+    pub api_key: Option<String>,
+
     /// Apps that the user has removed from Homarr (don't re-add)
     #[serde(default)]
     pub removed_apps: HashSet<String>,

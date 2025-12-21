@@ -26,7 +26,7 @@ use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{AdapterError, Result};
 
 #[derive(Parser)]
 #[command(name = "homarr-container-adapter")]
@@ -114,9 +114,9 @@ async fn run_sync(config: &Config) -> Result<()> {
     // Load branding
     let branding = branding::BrandingConfig::load(&config.branding_file)?;
 
-    // Create client and login
-    let client = homarr::HomarrClient::new(&config.homarr_url)?;
-    client.ensure_logged_in(&branding).await?;
+    // Create client and set up authentication
+    let mut client = homarr::HomarrClient::new(&config.homarr_url)?;
+    ensure_authenticated(&mut client, config, &mut state).await?;
 
     // Pre-fetch existing apps for efficient deduplication
     let existing_apps = client.get_all_apps().await.unwrap_or_else(|e| {
@@ -171,14 +171,69 @@ async fn run_sync(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Ensure the Homarr client is authenticated with a valid API key.
+///
+/// If a permanent API key is stored in state, use it.
+/// Otherwise, rotate from the bootstrap API key to a new permanent key.
+async fn ensure_authenticated(
+    client: &mut homarr::HomarrClient,
+    config: &Config,
+    state: &mut state::State,
+) -> Result<()> {
+    use std::fs;
+
+    // Check if we already have a permanent API key
+    if let Some(ref api_key) = state.api_key {
+        info!("Using stored API key for authentication");
+        client.set_api_key(api_key.clone());
+        return Ok(());
+    }
+
+    // No permanent key - need to rotate from bootstrap key
+    info!("No permanent API key found, rotating from bootstrap key");
+
+    // Read bootstrap key from file
+    let bootstrap_key = fs::read_to_string(&config.bootstrap_api_key_file)
+        .map_err(|e| {
+            AdapterError::Config(format!(
+                "Failed to read bootstrap API key from {}: {}",
+                config.bootstrap_api_key_file, e
+            ))
+        })?
+        .trim()
+        .to_string();
+
+    if bootstrap_key.is_empty() {
+        return Err(AdapterError::Config(
+            "Bootstrap API key file is empty".to_string(),
+        ));
+    }
+
+    // Rotate to permanent key
+    let permanent_key = client.rotate_api_key(&bootstrap_key).await?;
+
+    // Save the permanent key to state
+    state.api_key = Some(permanent_key.clone());
+    state.save(&config.state_file)?;
+
+    info!("API key rotation complete, permanent key saved to state");
+    Ok(())
+}
+
 async fn run_setup(config: &Config) -> Result<()> {
     // Load branding config
     let branding = branding::BrandingConfig::load(&config.branding_file)?;
 
     // Create Homarr client
-    let client = homarr::HomarrClient::new(&config.homarr_url)?;
+    let mut client = homarr::HomarrClient::new(&config.homarr_url)?;
 
-    // Check onboarding status
+    // Load state
+    let mut state = state::State::load(&config.state_file).unwrap_or_default();
+
+    // Ensure we have a valid API key (rotate from bootstrap if needed)
+    ensure_authenticated(&mut client, config, &mut state).await?;
+
+    // Check onboarding status (should already be complete from seed database)
     let step = client.get_onboarding_step().await?;
     info!("Current onboarding step: {:?}", step);
 
@@ -187,12 +242,9 @@ async fn run_setup(config: &Config) -> Result<()> {
         client.complete_onboarding(&branding).await?;
     }
 
-    // Login and create default board
+    // Set up default board
     info!("Setting up default board");
     client.setup_default_board(&branding).await?;
-
-    // Load state to check if Authelia sync is needed
-    let mut state = state::State::load(&config.state_file).unwrap_or_default();
 
     // Sync credentials to Authelia if not already done
     if !state.authelia_sync_completed {

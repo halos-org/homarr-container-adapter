@@ -13,6 +13,8 @@ use crate::registry::AppDefinition;
 pub struct HomarrClient {
     client: Client,
     base_url: String,
+    /// API key for authentication (format: "{id}.{token}")
+    api_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +86,12 @@ struct CreateAppResponse {
     #[serde(rename = "appId")]
     app_id: String,
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateApiKeyResponse {
+    #[serde(rename = "apiKey")]
+    api_key: String,
 }
 
 /// Minimal app data from app.selectable endpoint
@@ -191,14 +199,56 @@ impl HomarrClient {
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: None,
         })
+    }
+
+    /// Set the API key for authentication
+    ///
+    /// When set, all requests will include the `Authorization: Bearer <api_key>` header.
+    pub fn set_api_key(&mut self, api_key: String) {
+        self.api_key = Some(api_key);
+    }
+
+    /// Make an authenticated GET request
+    async fn get(&self, url: &str) -> reqwest::Result<reqwest::Response> {
+        let mut request = self.client.get(url);
+        if let Some(ref api_key) = self.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        request.send().await
+    }
+
+    /// Make an authenticated POST request with JSON body
+    async fn post_json<T: Serialize + ?Sized>(
+        &self,
+        url: &str,
+        body: &T,
+    ) -> reqwest::Result<reqwest::Response> {
+        let mut request = self.client.post(url).json(body);
+        if let Some(ref api_key) = self.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        request.send().await
+    }
+
+    /// Make an authenticated POST request with form data
+    async fn post_form<T: Serialize + ?Sized>(
+        &self,
+        url: &str,
+        form: &T,
+    ) -> reqwest::Result<reqwest::Response> {
+        let mut request = self.client.post(url).form(form);
+        if let Some(ref api_key) = self.api_key {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        request.send().await
     }
 
     /// Get current onboarding step
     pub async fn get_onboarding_step(&self) -> Result<OnboardingStep> {
         let url = format!("{}/api/trpc/onboard.currentStep", self.base_url);
-        let response: TrpcResponse<OnboardingStep> =
-            self.client.get(&url).send().await?.json().await?;
+        let response: TrpcResponse<OnboardingStep> = self.get(&url).await?.json().await?;
         Ok(response.result.data.json)
     }
 
@@ -233,11 +283,7 @@ impl HomarrClient {
     /// Advance to next onboarding step
     async fn advance_onboarding_step(&self) -> Result<()> {
         let url = format!("{}/api/trpc/onboard.nextStep", self.base_url);
-        self.client
-            .post(&url)
-            .json(&json!({"json": {}}))
-            .send()
-            .await?;
+        self.post_json(&url, &json!({"json": {}})).await?;
         Ok(())
     }
 
@@ -252,7 +298,7 @@ impl HomarrClient {
             }
         });
 
-        let response = self.client.post(&url).json(&payload).send().await?;
+        let response = self.post_json(&url, &payload).await?;
 
         if !response.status().is_success() {
             let text = response.text().await?;
@@ -285,15 +331,16 @@ impl HomarrClient {
             }
         });
 
-        self.client.post(&url).json(&payload).send().await?;
+        self.post_json(&url, &payload).await?;
         Ok(())
     }
 
-    /// Login to Homarr and get session
+    /// Login to Homarr and get session (deprecated - use API key instead)
+    #[allow(dead_code)]
     async fn login(&self, branding: &BrandingConfig) -> Result<()> {
         // Get CSRF token
         let csrf_url = format!("{}/api/auth/csrf", self.base_url);
-        let csrf_response: CsrfResponse = self.client.get(&csrf_url).send().await?.json().await?;
+        let csrf_response: CsrfResponse = self.get(&csrf_url).await?.json().await?;
 
         // Login
         let login_url = format!("{}/api/auth/callback/credentials", self.base_url);
@@ -303,7 +350,7 @@ impl HomarrClient {
             ("password", &branding.credentials.admin_password),
         ];
 
-        let response = self.client.post(&login_url).form(&params).send().await?;
+        let response = self.post_form(&login_url, &params).await?;
 
         if !response.status().is_success() && response.status().as_u16() != 302 {
             return Err(AdapterError::HomarrApi("Login failed".to_string()));
@@ -313,10 +360,9 @@ impl HomarrClient {
     }
 
     /// Set up default board
+    ///
+    /// Requires API key to be set via `set_api_key()` before calling.
     pub async fn setup_default_board(&self, branding: &BrandingConfig) -> Result<()> {
-        // Login first
-        self.login(branding).await?;
-
         // Check if board already exists
         let board = self.get_board_by_name(&branding.board.name).await;
 
@@ -400,7 +446,7 @@ impl HomarrClient {
         let payload = json!({ "json": settings });
 
         tracing::info!("Applying board branding settings");
-        let response = self.client.post(&url).json(&payload).send().await?;
+        let response = self.post_json(&url, &payload).await?;
 
         if !response.status().is_success() {
             let text = response.text().await?;
@@ -419,7 +465,7 @@ impl HomarrClient {
             urlencoding::encode(&format!("{{\"json\":{{\"name\":\"{}\"}}}}", name))
         );
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.get(&url).await?;
 
         if !response.status().is_success() {
             return Err(AdapterError::HomarrApi("Board not found".to_string()));
@@ -440,7 +486,7 @@ impl HomarrClient {
             }
         });
 
-        let response = self.client.post(&url).json(&payload).send().await?;
+        let response = self.post_json(&url, &payload).await?;
         let trpc_response: TrpcResponse<CreateBoardResponse> = response.json().await?;
 
         Ok(trpc_response.result.data.json.board_id)
@@ -450,7 +496,7 @@ impl HomarrClient {
     async fn set_home_board(&self, board_id: &str) -> Result<()> {
         let url = format!("{}/api/trpc/board.setHomeBoard", self.base_url);
         let payload = json!({"json": {"id": board_id}});
-        self.client.post(&url).json(&payload).send().await?;
+        self.post_json(&url, &payload).await?;
         Ok(())
     }
 
@@ -458,13 +504,101 @@ impl HomarrClient {
     async fn set_color_scheme(&self, scheme: &str) -> Result<()> {
         let url = format!("{}/api/trpc/user.changeColorScheme", self.base_url);
         let payload = json!({"json": {"colorScheme": scheme}});
-        self.client.post(&url).json(&payload).send().await?;
+        self.post_json(&url, &payload).await?;
         Ok(())
     }
 
-    /// Ensure we're logged in
-    pub async fn ensure_logged_in(&self, branding: &BrandingConfig) -> Result<()> {
-        self.login(branding).await
+    /// Check if the client is authenticated (has API key set)
+    #[allow(dead_code)]
+    pub fn is_authenticated(&self) -> bool {
+        self.api_key.is_some()
+    }
+
+    /// Create a new API key
+    ///
+    /// Requires authentication (API key must be set).
+    /// Returns the new API key in format "{id}.{token}".
+    pub async fn create_api_key(&self) -> Result<String> {
+        let url = format!("{}/api/trpc/apiKeys.create", self.base_url);
+        let payload = json!({"json": {}});
+
+        let response = self.post_json(&url, &payload).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "Failed to create API key ({}): {}",
+                status, text
+            )));
+        }
+
+        let trpc_response: TrpcResponse<CreateApiKeyResponse> = response.json().await?;
+        Ok(trpc_response.result.data.json.api_key)
+    }
+
+    /// Delete an API key by ID
+    ///
+    /// Requires authentication (API key must be set).
+    pub async fn delete_api_key(&self, api_key_id: &str) -> Result<()> {
+        let url = format!("{}/api/trpc/apiKeys.delete", self.base_url);
+        let payload = json!({"json": {"apiKeyId": api_key_id}});
+
+        let response = self.post_json(&url, &payload).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "Failed to delete API key '{}' ({}): {}",
+                api_key_id, status, text
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Rotate from a bootstrap API key to a new permanent key
+    ///
+    /// This method:
+    /// 1. Authenticates with the bootstrap key
+    /// 2. Creates a new random API key
+    /// 3. Deletes the bootstrap key
+    /// 4. Returns the new API key
+    ///
+    /// If the rotation fails partway through, the bootstrap key may still be valid
+    /// and the operation can be retried.
+    pub async fn rotate_api_key(&mut self, bootstrap_key: &str) -> Result<String> {
+        // Extract the bootstrap key ID (format: "{id}.{token}")
+        let bootstrap_id = bootstrap_key
+            .split('.')
+            .next()
+            .ok_or_else(|| AdapterError::HomarrApi("Invalid bootstrap key format".to_string()))?;
+
+        tracing::info!("Rotating bootstrap API key to permanent key...");
+
+        // Authenticate with bootstrap key
+        self.set_api_key(bootstrap_key.to_string());
+
+        // Create new API key
+        let new_key = self.create_api_key().await?;
+        tracing::info!("Created new permanent API key");
+
+        // Switch to new key for further operations
+        self.set_api_key(new_key.clone());
+
+        // Delete the bootstrap key
+        match self.delete_api_key(bootstrap_id).await {
+            Ok(()) => {
+                tracing::info!("Deleted bootstrap API key");
+            }
+            Err(e) => {
+                // Log but don't fail - the new key is already working
+                tracing::warn!("Failed to delete bootstrap key (non-fatal): {}", e);
+            }
+        }
+
+        Ok(new_key)
     }
 
     /// Get all apps (minimal data for matching)
@@ -473,7 +607,7 @@ impl HomarrClient {
     /// Callers can cache this result to avoid repeated API calls.
     pub async fn get_all_apps(&self) -> Result<Vec<SelectableApp>> {
         let url = format!("{}/api/trpc/app.selectable", self.base_url);
-        let response = self.client.get(&url).send().await?;
+        let response = self.get(&url).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -548,7 +682,7 @@ impl HomarrClient {
             }
         });
 
-        let response = self.client.post(&url).json(&payload).send().await?;
+        let response = self.post_json(&url, &payload).await?;
 
         if !response.status().is_success() {
             let text = response.text().await?;
@@ -595,7 +729,7 @@ impl HomarrClient {
             }
         });
 
-        let response = self.client.post(&url).json(&payload).send().await?;
+        let response = self.post_json(&url, &payload).await?;
 
         if !response.status().is_success() {
             let text = response.text().await?;
@@ -696,7 +830,7 @@ impl HomarrClient {
             }
         });
 
-        self.client.post(&url).json(&payload).send().await?;
+        self.post_json(&url, &payload).await?;
 
         tracing::debug!(
             "Added registry app '{}' to board at ({}, {}) size {}x{}",
@@ -718,7 +852,7 @@ impl HomarrClient {
             urlencoding::encode(&format!("{{\"json\":{{\"name\":\"{}\"}}}}", board_name))
         );
 
-        let response = self.client.get(&url).send().await?;
+        let response = self.get(&url).await?;
 
         if !response.status().is_success() {
             return Ok(vec![]);
