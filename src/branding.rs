@@ -33,12 +33,6 @@ pub struct Identity {
     /// Favicon URL served via /branding/ prefix
     #[serde(default)]
     pub favicon_image_url: Option<String>,
-    /// Legacy logo path (backwards compatibility)
-    #[serde(default)]
-    pub logo_path: Option<String>,
-    /// Legacy favicon path (backwards compatibility)
-    #[serde(default)]
-    pub favicon_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
