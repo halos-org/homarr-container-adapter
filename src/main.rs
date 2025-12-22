@@ -28,6 +28,10 @@ use tracing_subscriber::FmtSubscriber;
 use crate::config::Config;
 use crate::error::{AdapterError, Result};
 
+/// Default board ID for removal tracking during single-board operation.
+/// TODO: Remove this when multi-board sync is implemented (#33).
+const DEFAULT_BOARD_ID: &str = "default";
+
 #[derive(Parser)]
 #[command(name = "homarr-container-adapter")]
 #[command(about = "Adapter for Homarr dashboard: first-boot setup and app registry sync")]
@@ -133,7 +137,8 @@ async fn run_sync(config: &Config) -> Result<()> {
 
     let mut synced_count = 0;
     for entry in &registry_apps {
-        if state.is_removed(&entry.app.url) {
+        // TODO: Replace with per-board checking when multi-board sync is implemented (#33)
+        if state.is_removed_from_board(DEFAULT_BOARD_ID, &entry.app.url) {
             info!(
                 "Registry app '{}' was removed by user, skipping",
                 entry.app.name

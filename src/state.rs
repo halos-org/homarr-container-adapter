@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -29,9 +29,10 @@ pub struct State {
     #[serde(default)]
     pub api_key: Option<String>,
 
-    /// Apps that the user has removed from Homarr (don't re-add)
+    /// Apps removed from specific boards (don't re-add to that board)
+    /// Key: board_id, Value: set of app URLs removed from that board
     #[serde(default)]
-    pub removed_apps: HashSet<String>,
+    pub removed_apps_by_board: HashMap<String, HashSet<String>>,
 
     /// Last sync timestamp
     #[serde(default)]
@@ -89,15 +90,30 @@ impl State {
         Ok(())
     }
 
-    /// Mark an app as removed by user
-    #[allow(dead_code)]
-    pub fn mark_removed(&mut self, app_id: &str) {
-        self.removed_apps.insert(app_id.to_string());
+    /// Check if an app was removed from a specific board
+    pub fn is_removed_from_board(&self, board_id: &str, app_url: &str) -> bool {
+        self.removed_apps_by_board
+            .get(board_id)
+            .map(|apps| apps.contains(app_url))
+            .unwrap_or(false)
     }
 
-    /// Check if an app was removed by user
-    pub fn is_removed(&self, app_id: &str) -> bool {
-        self.removed_apps.contains(app_id)
+    /// Mark an app as removed from a specific board
+    #[allow(dead_code)]
+    pub fn mark_removed_from_board(&mut self, board_id: &str, app_url: &str) {
+        self.removed_apps_by_board
+            .entry(board_id.to_string())
+            .or_default()
+            .insert(app_url.to_string());
+    }
+
+    /// Clear the removed flag for an app on a specific board
+    /// Called when user manually re-adds an app to a board
+    #[allow(dead_code)]
+    pub fn clear_removed_from_board(&mut self, board_id: &str, app_url: &str) {
+        if let Some(apps) = self.removed_apps_by_board.get_mut(board_id) {
+            apps.remove(app_url);
+        }
     }
 
     /// Update last sync time
@@ -115,7 +131,7 @@ mod tests {
     fn test_default_state() {
         let state = State::default();
         assert!(!state.first_boot_completed);
-        assert!(state.removed_apps.is_empty());
+        assert!(state.removed_apps_by_board.is_empty());
         assert!(state.last_sync.is_none());
         assert!(state.discovered_apps.is_empty());
         // Default derive uses String::default() (empty), default_version is for serde
@@ -139,8 +155,9 @@ mod tests {
             first_boot_completed: true,
             ..Default::default()
         };
-        state.mark_removed("app1");
-        state.mark_removed("app2");
+        state.mark_removed_from_board("board-1", "http://app1.local");
+        state.mark_removed_from_board("board-1", "http://app2.local");
+        state.mark_removed_from_board("board-2", "http://app1.local");
         state.update_sync_time();
 
         // Save
@@ -149,19 +166,40 @@ mod tests {
         // Load back
         let loaded = State::load(&state_path).unwrap();
         assert!(loaded.first_boot_completed);
-        assert!(loaded.is_removed("app1"));
-        assert!(loaded.is_removed("app2"));
-        assert!(!loaded.is_removed("app3"));
+        assert!(loaded.is_removed_from_board("board-1", "http://app1.local"));
+        assert!(loaded.is_removed_from_board("board-1", "http://app2.local"));
+        assert!(loaded.is_removed_from_board("board-2", "http://app1.local"));
+        assert!(!loaded.is_removed_from_board("board-2", "http://app2.local"));
+        assert!(!loaded.is_removed_from_board("board-3", "http://app1.local"));
         assert!(loaded.last_sync.is_some());
     }
 
     #[test]
-    fn test_mark_removed_and_is_removed() {
+    fn test_per_board_removal_tracking() {
         let mut state = State::default();
+        let board_a = "board-a";
+        let board_b = "board-b";
+        let app_url = "http://test-app.local";
 
-        assert!(!state.is_removed("test-app"));
-        state.mark_removed("test-app");
-        assert!(state.is_removed("test-app"));
+        // Initially not removed from any board
+        assert!(!state.is_removed_from_board(board_a, app_url));
+        assert!(!state.is_removed_from_board(board_b, app_url));
+
+        // Mark removed from board A
+        state.mark_removed_from_board(board_a, app_url);
+
+        // Should be removed from A but not B
+        assert!(state.is_removed_from_board(board_a, app_url));
+        assert!(!state.is_removed_from_board(board_b, app_url));
+
+        // Mark removed from board B too
+        state.mark_removed_from_board(board_b, app_url);
+        assert!(state.is_removed_from_board(board_b, app_url));
+
+        // Clear from board A (user re-added)
+        state.clear_removed_from_board(board_a, app_url);
+        assert!(!state.is_removed_from_board(board_a, app_url));
+        assert!(state.is_removed_from_board(board_b, app_url));
     }
 
     #[test]
@@ -251,15 +289,24 @@ mod tests {
     }
 
     #[test]
-    fn test_removed_apps_tracked_by_url() {
+    fn test_removed_apps_tracked_by_url_per_board() {
         let mut state = State::default();
+        let board_id = "test-board";
         let url = "http://localhost:3000";
 
-        assert!(!state.is_removed(url));
-        state.mark_removed(url);
-        assert!(state.is_removed(url));
+        assert!(!state.is_removed_from_board(board_id, url));
+        state.mark_removed_from_board(board_id, url);
+        assert!(state.is_removed_from_board(board_id, url));
 
         // Different container ID with same URL should still be considered removed
         // (we track by URL, not container_id)
+    }
+
+    #[test]
+    fn test_clear_removed_nonexistent_board() {
+        let mut state = State::default();
+        // Should not panic when clearing from a board that doesn't exist
+        state.clear_removed_from_board("nonexistent-board", "http://app.local");
+        assert!(!state.is_removed_from_board("nonexistent-board", "http://app.local"));
     }
 }
