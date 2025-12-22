@@ -28,10 +28,6 @@ use tracing_subscriber::FmtSubscriber;
 use crate::config::Config;
 use crate::error::{AdapterError, Result};
 
-/// Default board ID for removal tracking during single-board operation.
-/// TODO: Remove this when multi-board sync is implemented (#33).
-const DEFAULT_BOARD_ID: &str = "default";
-
 #[derive(Parser)]
 #[command(name = "homarr-container-adapter")]
 #[command(about = "Adapter for Homarr dashboard: first-boot setup and app registry sync")]
@@ -127,12 +123,30 @@ async fn run_sync(config: &Config) -> Result<()> {
         state = state::State::load(&config.state_file)?;
     }
 
-    // Load branding
-    let branding = branding::BrandingConfig::load(&config.branding_file)?;
-
     // Create client and set up authentication
     let mut client = homarr::HomarrClient::new(&config.homarr_url)?;
     ensure_authenticated(&mut client, config, &mut state).await?;
+
+    // Discover writable boards
+    let writable_boards = client.get_writable_boards().await.unwrap_or_else(|e| {
+        warn!("Failed to fetch writable boards: {}", e);
+        vec![]
+    });
+
+    if writable_boards.is_empty() {
+        warn!("No writable boards found, skipping sync");
+        return Ok(());
+    }
+
+    info!(
+        "Found {} writable board(s): {}",
+        writable_boards.len(),
+        writable_boards
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     // Pre-fetch existing apps for efficient deduplication
     let existing_apps = client.get_all_apps().await.unwrap_or_else(|e| {
@@ -140,43 +154,51 @@ async fn run_sync(config: &Config) -> Result<()> {
         vec![]
     });
 
-    // Load and sync registry apps
+    // Load registry apps
     info!("Loading apps from registry: {}", config.registry_dir);
     let registry_apps = registry::load_all_apps(&config.registry_dir).unwrap_or_else(|e| {
         warn!("Failed to load registry apps: {}", e);
         vec![]
     });
 
+    // Sync each app to each writable board
     let mut synced_count = 0;
     for entry in &registry_apps {
-        // TODO: Replace with per-board checking when multi-board sync is implemented (#33)
-        if state.is_removed_from_board(DEFAULT_BOARD_ID, &entry.app.url) {
-            info!(
-                "Registry app '{}' was removed by user, skipping",
-                entry.app.name
-            );
-            continue;
-        }
+        // Track app in discovered_apps (once per app, not per board)
+        let container_id = entry.app.container_name().unwrap_or("").to_string();
+        state.discovered_apps.insert(
+            entry.app.url.clone(),
+            state::DiscoveredApp {
+                name: entry.app.name.clone(),
+                container_id,
+                added_at: chrono::Utc::now(),
+            },
+        );
 
-        match client
-            .add_registry_app(&entry.app, &branding.board.name, Some(&existing_apps))
-            .await
-        {
-            Ok(_) => {
-                // Track in state (use empty container_id for non-container apps)
-                let container_id = entry.app.container_name().unwrap_or("").to_string();
-                state.discovered_apps.insert(
-                    entry.app.url.clone(),
-                    state::DiscoveredApp {
-                        name: entry.app.name.clone(),
-                        container_id,
-                        added_at: chrono::Utc::now(),
-                    },
+        // Sync to each writable board
+        for board in &writable_boards {
+            // Check if app was removed from this specific board
+            if state.is_removed_from_board(&board.id, &entry.app.url) {
+                debug!(
+                    "App '{}' was removed from board '{}', skipping",
+                    entry.app.name, board.name
                 );
-                synced_count += 1;
+                continue;
             }
-            Err(e) => {
-                warn!("Failed to add registry app '{}': {}", entry.app.name, e);
+
+            match client
+                .add_registry_app(&entry.app, &board.name, Some(&existing_apps))
+                .await
+            {
+                Ok(_) => {
+                    synced_count += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to add app '{}' to board '{}': {}",
+                        entry.app.name, board.name, e
+                    );
+                }
             }
         }
     }
@@ -184,7 +206,10 @@ async fn run_sync(config: &Config) -> Result<()> {
     state.update_sync_time();
     state.save(&config.state_file)?;
 
-    info!("Sync complete: {} apps synced from registry", synced_count);
+    info!(
+        "Sync complete: {} app-board combinations synced",
+        synced_count
+    );
     Ok(())
 }
 
