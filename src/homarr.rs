@@ -433,8 +433,9 @@ impl HomarrClient {
         self.save_board_branding_settings(&board_id, branding)
             .await?;
 
-        // Set as home board
-        self.set_home_board(&board_id).await?;
+        // Set as home board (both user and server-wide)
+        self.set_user_home_board(&board_id).await?;
+        self.set_server_home_board(&board_id).await?;
 
         // Set color scheme
         self.set_color_scheme(&branding.theme.default_color_scheme)
@@ -546,11 +547,44 @@ impl HomarrClient {
         Ok(trpc_response.result.data.json.board_id)
     }
 
-    /// Set home board
-    async fn set_home_board(&self, board_id: &str) -> Result<()> {
+    /// Set user's home board
+    ///
+    /// This sets the home board for the current user (stored in users table).
+    async fn set_user_home_board(&self, board_id: &str) -> Result<()> {
         let url = format!("{}/api/trpc/board.setHomeBoard", self.base_url);
         let payload = json!({"json": {"id": board_id}});
         self.post_json(&url, &payload).await?;
+        Ok(())
+    }
+
+    /// Set server-wide home board
+    ///
+    /// This sets the default home board for the server (stored in serverSettings).
+    /// This is the board shown to users who haven't set their own home board.
+    async fn set_server_home_board(&self, board_id: &str) -> Result<()> {
+        let url = format!("{}/api/trpc/serverSettings.saveSettings", self.base_url);
+        let payload = json!({
+            "json": {
+                "settingsKey": "board",
+                "value": {
+                    "homeBoardId": board_id,
+                    "mobileHomeBoardId": board_id,
+                    "enableStatusByDefault": true,
+                    "forceDisableStatus": false
+                }
+            }
+        });
+
+        let response = self.post_json(&url, &payload).await?;
+
+        if !response.status().is_success() {
+            let text = response.text().await.unwrap_or_default();
+            tracing::warn!("Failed to set server home board: {}", text);
+            // Don't fail the whole setup if this fails
+        } else {
+            tracing::info!("Server home board set to '{}'", board_id);
+        }
+
         Ok(())
     }
 
