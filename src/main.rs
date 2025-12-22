@@ -49,6 +49,13 @@ struct Cli {
     #[arg(short, long)]
     debug: bool,
 
+    /// Reset state before running command
+    ///
+    /// Clears all persistent state including API key, sync history, and
+    /// removal tracking. Useful for testing or recovering from corrupted state.
+    #[arg(long)]
+    reset_state: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -82,6 +89,11 @@ async fn main() -> Result<()> {
 
     // Load config
     let config = Config::load(&cli.config)?;
+
+    // Handle --reset-state flag
+    if cli.reset_state {
+        reset_state(&config)?;
+    }
 
     match cli.command {
         Commands::Sync => {
@@ -333,6 +345,33 @@ async fn check_status(config: &Config) -> Result<()> {
         }
     } else {
         println!("Status: First-boot setup pending");
+    }
+
+    Ok(())
+}
+
+/// Reset adapter state to initial values
+///
+/// Removes the state file, clearing:
+/// - API key (will be re-rotated from bootstrap key)
+/// - First-boot completion flag (will re-run setup)
+/// - Authelia sync flag
+/// - Discovered apps tracking
+/// - Removed apps tracking
+/// - Last sync timestamp
+fn reset_state(config: &Config) -> Result<()> {
+    use std::path::Path;
+
+    let state_path = Path::new(&config.state_file);
+
+    if state_path.exists() {
+        std::fs::remove_file(state_path)?;
+        info!("State file removed: {}", config.state_file);
+    } else {
+        info!(
+            "State file does not exist, nothing to reset: {}",
+            config.state_file
+        );
     }
 
     Ok(())
