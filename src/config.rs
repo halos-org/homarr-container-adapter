@@ -80,7 +80,7 @@ fn default_bootstrap_api_key_file() -> String {
 }
 
 fn default_sync_interval() -> u64 {
-    15 // 15 seconds - fast feedback for app installations
+    300 // 5 minutes - fallback for missed Docker events
 }
 
 fn default_startup_delay() -> u64 {
