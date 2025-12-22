@@ -105,6 +105,35 @@ pub struct SelectableApp {
     pub href: Option<String>,
 }
 
+/// Board permission level
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BoardPermission {
+    /// Can view the board but not modify
+    View,
+    /// Can modify apps and items on the board
+    Modify,
+    /// Full control including board settings
+    Full,
+}
+
+impl BoardPermission {
+    /// Check if this permission level allows writing (adding/removing apps)
+    #[allow(dead_code)]
+    pub fn is_writable(&self) -> bool {
+        matches!(self, BoardPermission::Modify | BoardPermission::Full)
+    }
+}
+
+/// Board with permission info from getAllBoards endpoint
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct BoardWithPermission {
+    pub id: String,
+    pub name: String,
+    pub permission: BoardPermission,
+}
+
 /// Default icon path (relative URL)
 const DEFAULT_ICON: &str = "/icons/docker.svg";
 
@@ -620,6 +649,42 @@ impl HomarrClient {
 
         let trpc_response: TrpcResponse<Vec<SelectableApp>> = response.json().await?;
         Ok(trpc_response.result.data.json)
+    }
+
+    /// Get all boards with permission info
+    ///
+    /// Returns all boards accessible to the authenticated user, with their
+    /// permission levels. Used for multi-board sync to discover which boards
+    /// the adapter can sync apps to.
+    #[allow(dead_code)]
+    pub async fn get_all_boards(&self) -> Result<Vec<BoardWithPermission>> {
+        let url = format!("{}/api/trpc/board.getAllBoards", self.base_url);
+        let response = self.get(&url).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "Failed to fetch boards ({}): {}",
+                status, text
+            )));
+        }
+
+        let trpc_response: TrpcResponse<Vec<BoardWithPermission>> = response.json().await?;
+        Ok(trpc_response.result.data.json)
+    }
+
+    /// Get all writable boards (modify or full permission)
+    ///
+    /// Convenience method that filters `get_all_boards()` to only return
+    /// boards where the adapter can add/remove apps.
+    #[allow(dead_code)]
+    pub async fn get_writable_boards(&self) -> Result<Vec<BoardWithPermission>> {
+        let boards = self.get_all_boards().await?;
+        Ok(boards
+            .into_iter()
+            .filter(|b| b.permission.is_writable())
+            .collect())
     }
 
     /// Find an existing app by URL in a pre-fetched list
@@ -1252,5 +1317,50 @@ mod tests {
     fn test_derive_ping_url_invalid_url_returns_none() {
         let result = derive_ping_url("not-a-valid-url");
         assert_eq!(result, None);
+    }
+
+    // Tests for BoardPermission
+
+    #[test]
+    fn test_board_permission_view_not_writable() {
+        assert!(!BoardPermission::View.is_writable());
+    }
+
+    #[test]
+    fn test_board_permission_modify_is_writable() {
+        assert!(BoardPermission::Modify.is_writable());
+    }
+
+    #[test]
+    fn test_board_permission_full_is_writable() {
+        assert!(BoardPermission::Full.is_writable());
+    }
+
+    #[test]
+    fn test_board_permission_deserialize() {
+        // Test that BoardPermission deserializes from camelCase JSON
+        let json = r#"{"id":"board-1","name":"Test Board","permission":"modify"}"#;
+        let board: BoardWithPermission = serde_json::from_str(json).unwrap();
+        assert_eq!(board.id, "board-1");
+        assert_eq!(board.name, "Test Board");
+        assert_eq!(board.permission, BoardPermission::Modify);
+    }
+
+    #[test]
+    fn test_board_permission_deserialize_all_levels() {
+        // View
+        let view: BoardWithPermission =
+            serde_json::from_str(r#"{"id":"1","name":"View","permission":"view"}"#).unwrap();
+        assert_eq!(view.permission, BoardPermission::View);
+
+        // Modify
+        let modify: BoardWithPermission =
+            serde_json::from_str(r#"{"id":"2","name":"Modify","permission":"modify"}"#).unwrap();
+        assert_eq!(modify.permission, BoardPermission::Modify);
+
+        // Full
+        let full: BoardWithPermission =
+            serde_json::from_str(r#"{"id":"3","name":"Full","permission":"full"}"#).unwrap();
+        assert_eq!(full.permission, BoardPermission::Full);
     }
 }
