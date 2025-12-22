@@ -20,12 +20,20 @@ The homarr-container-adapter is a Rust service that bridges Docker container met
 - FR-1.6: Set dashboard as home board
 - FR-1.7: Apply theme color scheme
 
-#### Container Discovery (FR-2)
+#### Container Discovery and Multi-Board Sync (FR-2)
 - FR-2.1: Monitor Docker daemon for container changes
 - FR-2.2: Parse `homarr.*` labels from containers
-- FR-2.3: Add discovered apps to Homarr dashboard
-- FR-2.4: Respect user removal decisions (don't re-add removed apps)
-- FR-2.5: Track sync state persistently
+- FR-2.3: Create discovered apps in Homarr's global app registry
+- FR-2.4: Discover all boards the sync user has write access to
+- FR-2.5: Add discovered apps to all writable boards
+- FR-2.6: Track app removals per-board (removing from Board A doesn't affect Board B)
+- FR-2.7: Track sync state persistently
+
+#### Seed Database Users (FR-3)
+- FR-3.1: Create `halos-sync` user as service account for API key ownership
+- FR-3.2: Create `admin` user for human admin OIDC login
+- FR-3.3: Both users belong to admins group with full board access
+- FR-3.4: Bootstrap API key is owned by halos-sync user (rotated on first boot)
 
 ### Non-Functional Requirements
 
@@ -96,63 +104,6 @@ debug = false
 ### Branding Configuration
 
 See halos-homarr-branding package for branding configuration schema.
-
-## API Interactions
-
-The adapter uses Homarr's tRPC API (not REST). Key endpoints:
-
-### Onboarding
-- `GET /api/trpc/onboard.currentStep` - Get current step
-- `POST /api/trpc/onboard.nextStep` - Advance to next step
-- `POST /api/trpc/user.initUser` - Create initial user
-- `POST /api/trpc/serverSettings.initSettings` - Configure settings
-
-### Authentication (API Key)
-
-The adapter uses API key authentication via the `ApiKey: <api_key>` header (Homarr's OpenAPI format).
-This allows Homarr to run with `AUTH_PROVIDERS="oidc"` (no credentials login).
-
-**API Key Rotation Flow (First Boot):**
-1. Read bootstrap API key from `/etc/halos-homarr-branding/bootstrap-api-key`
-2. Create new permanent API key via `POST /api/trpc/apiKeys.create`
-3. Delete bootstrap key via `POST /api/trpc/apiKeys.delete`
-4. Store permanent key in state file
-
-Key endpoints:
-- `POST /api/trpc/apiKeys.create` - Create new API key
-- `POST /api/trpc/apiKeys.delete` - Delete API key by ID
-
-### Board Management
-- `GET /api/trpc/board.getBoardByName` - Get board by name
-- `POST /api/trpc/board.createBoard` - Create new board
-- `POST /api/trpc/board.saveBoard` - Save board with items
-- `POST /api/trpc/board.setHomeBoard` - Set home board
-
-### App Management
-- `POST /api/trpc/app.create` - Create app
-- `GET /api/trpc/app.all` - List all apps
-
-## State Management
-
-The adapter maintains state in a JSON file:
-
-```json
-{
-  "version": "1.0",
-  "first_boot_completed": true,
-  "authelia_sync_completed": true,
-  "api_key": "abc123.randomtoken...",
-  "removed_apps": ["http://localhost:3000"],
-  "last_sync": "2025-01-15T10:30:00Z",
-  "discovered_apps": {
-    "http://localhost:3000": {
-      "name": "Signal K",
-      "container_id": "abc123def456",
-      "added_at": "2025-01-15T10:30:00Z"
-    }
-  }
-}
-```
 
 ## CLI Interface
 
