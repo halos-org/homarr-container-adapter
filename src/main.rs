@@ -161,9 +161,23 @@ async fn run_sync(config: &Config) -> Result<()> {
         vec![]
     });
 
-    // Sync each app to each writable board
+    // Filter to visible apps only
+    let visible_apps: Vec<_> = registry_apps
+        .iter()
+        .filter(|e| e.app.is_visible())
+        .collect();
+    let hidden_count = registry_apps.len() - visible_apps.len();
+    if hidden_count > 0 {
+        debug!(
+            "Filtered out {} hidden app(s) from {} total",
+            hidden_count,
+            registry_apps.len()
+        );
+    }
+
+    // Sync each visible app to each writable board
     let mut synced_count = 0;
-    for entry in &registry_apps {
+    for entry in &visible_apps {
         // Track app in discovered_apps (once per app, not per board)
         let container_id = entry.app.container_name().unwrap_or("").to_string();
         state.discovered_apps.insert(
@@ -207,7 +221,8 @@ async fn run_sync(config: &Config) -> Result<()> {
     state.save(&config.state_file)?;
 
     info!(
-        "Sync complete: {} app-board combinations synced",
+        "Sync complete: {} visible app(s), {} app-board combinations synced",
+        visible_apps.len(),
         synced_count
     );
     Ok(())

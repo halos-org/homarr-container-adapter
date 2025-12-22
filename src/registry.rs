@@ -34,6 +34,10 @@ pub struct AppDefinition {
     /// Category for grouping (e.g., "Marine", "System")
     pub category: Option<String>,
 
+    /// Whether app appears on Homarr dashboards (default: false)
+    #[serde(default)]
+    pub visible: bool,
+
     /// App type classification
     #[serde(rename = "type", default)]
     pub app_type: AppType,
@@ -123,6 +127,11 @@ impl AppDefinition {
     /// Check if this is an external link (no health checks)
     pub fn is_external(&self) -> bool {
         self.app_type.external
+    }
+
+    /// Check if app should appear on Homarr dashboards
+    pub fn is_visible(&self) -> bool {
+        self.visible
     }
 
     /// Get the container name if this is a container app
@@ -265,6 +274,7 @@ url = "http://localhost:8080"
         assert_eq!(entries[0].app.priority(), 50); // default
         assert!(!entries[0].app.is_container());
         assert!(!entries[0].app.is_external());
+        assert!(!entries[0].app.is_visible()); // default: false
     }
 
     #[test]
@@ -475,5 +485,59 @@ url = "http://localhost:8080"
         // Only valid file should be loaded (invalid URL is skipped)
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].app.name, "Valid App");
+    }
+
+    #[test]
+    fn test_visible_apps() {
+        let dir = TempDir::new().unwrap();
+
+        // Visible app
+        create_test_app_file(
+            dir.path(),
+            "visible-app",
+            r#"
+name = "Visible App"
+url = "http://localhost:8080"
+visible = true
+"#,
+        );
+
+        // Hidden app (explicit false)
+        create_test_app_file(
+            dir.path(),
+            "hidden-app",
+            r#"
+name = "Hidden App"
+url = "http://localhost:8081"
+visible = false
+"#,
+        );
+
+        // Default visibility (should be false)
+        create_test_app_file(
+            dir.path(),
+            "default-app",
+            r#"
+name = "Default App"
+url = "http://localhost:8082"
+"#,
+        );
+
+        let entries = load_all_apps(dir.path()).unwrap();
+        assert_eq!(entries.len(), 3);
+
+        let visible_app = entries
+            .iter()
+            .find(|e| e.app.name == "Visible App")
+            .unwrap();
+        let hidden_app = entries.iter().find(|e| e.app.name == "Hidden App").unwrap();
+        let default_app = entries
+            .iter()
+            .find(|e| e.app.name == "Default App")
+            .unwrap();
+
+        assert!(visible_app.app.is_visible());
+        assert!(!hidden_app.app.is_visible());
+        assert!(!default_app.app.is_visible()); // default is false
     }
 }
