@@ -24,9 +24,6 @@ readonly SCRIPT="$PROJECT_ROOT/$(basename "$0")"
 # Docker image name for cross-compilation
 readonly DOCKER_IMAGE="homarr-adapter-builder"
 
-# Default deploy target
-readonly DEFAULT_DEPLOY_TARGET="halos.local"
-
 ################################################################################
 # Build Commands
 
@@ -126,10 +123,17 @@ function lint {
 # Deploy Commands
 
 function deploy {
-  #@ Deploy ARM64 binary to test server (default: halos.local)
-  #@ Usage: ./run deploy [target_host]
+  #@ Deploy ARM64 binary to test server
+  #@ Usage: ./run deploy <target_host>
   #@ Category: Deploy
-  local target="${1:-$DEFAULT_DEPLOY_TARGET}"
+  local target="${1:-}"
+
+  if [[ -z "$target" ]]; then
+    echo "Usage: ./run deploy <target_host>"
+    echo ""
+    echo "Example: ./run deploy pi@myhost.local"
+    return 1
+  fi
 
   echo "Deploying to $target..."
 
@@ -263,10 +267,10 @@ function help {
   echo "Usage: ./run <command> [arguments...]"
   echo ""
   echo "Examples:"
-  echo "  ./run build-arm64      # Cross-compile for Raspberry Pi"
-  echo "  ./run deploy           # Deploy to halos.local"
-  echo "  ./run deploy-build     # Build and deploy in one step"
-  echo "  ./run logs-follow      # Watch service logs"
+  echo "  ./run build-arm64               # Cross-compile for Raspberry Pi"
+  echo "  ./run deploy pi@myhost.local    # Deploy to test server"
+  echo "  ./run deploy-build myhost.local # Build and deploy in one step"
+  echo "  ./run logs-follow               # Watch service logs"
 }
 
 ################################################################################

@@ -285,7 +285,7 @@ url = "http://localhost:8080"
             "signalk",
             r#"
 name = "Signal K"
-url = "http://halos.local:3000"
+url = "http://test.example.local:3000"
 description = "Marine data server"
 icon_url = "/icons/signalk.png"
 category = "Marine"

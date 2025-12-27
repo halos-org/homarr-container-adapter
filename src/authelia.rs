@@ -128,11 +128,12 @@ pub fn sync_credentials<P: AsRef<Path>>(
     let password_hash = hash_password(password)?;
 
     // Create user entry
+    // Default email uses example.local (RFC 2606 reserved domain) when not provided
     let user = User {
         displayname: username.to_string(),
         password: password_hash,
         email: email
-            .unwrap_or(&format!("{}@halos.local", username))
+            .unwrap_or(&format!("{}@example.local", username))
             .to_string(),
         groups: vec!["admins".to_string()],
     };
@@ -187,7 +188,7 @@ mod tests {
             User {
                 displayname: "Admin User".to_string(),
                 password: "$argon2id$test".to_string(),
-                email: "admin@halos.local".to_string(),
+                email: "admin@test.example.local".to_string(),
                 groups: vec!["admins".to_string()],
             },
         );
@@ -202,7 +203,7 @@ mod tests {
         assert!(loaded.users.contains_key("admin"));
         let admin = loaded.users.get("admin").unwrap();
         assert_eq!(admin.displayname, "Admin User");
-        assert_eq!(admin.email, "admin@halos.local");
+        assert_eq!(admin.email, "admin@test.example.local");
     }
 
     #[test]
@@ -231,9 +232,9 @@ mod tests {
         // Sync without email
         sync_credentials(&db_path, "admin", "password", None).unwrap();
 
-        // Verify default email
+        // Verify default email uses example.local placeholder domain
         let db = UsersDatabase::load(&db_path).unwrap();
         let user = db.users.get("admin").unwrap();
-        assert_eq!(user.email, "admin@halos.local");
+        assert_eq!(user.email, "admin@example.local");
     }
 }

@@ -165,7 +165,7 @@ const DEFAULT_ICON: &str = "/icons/docker.svg";
 /// Derive a host.docker.internal-based ping URL from the app URL.
 /// Replaces the hostname with host.docker.internal so Homarr container can reach the app.
 /// Note: Requires `extra_hosts: ["host.docker.internal:host-gateway"]` in Homarr's docker-compose.yml
-/// Example: "http://halos.local:3000/path" -> "http://host.docker.internal:3000/path"
+/// Example: "http://myhost.local:3000/path" -> "http://host.docker.internal:3000/path"
 fn derive_ping_url(app_url: &str) -> Option<String> {
     match url::Url::parse(app_url) {
         Ok(mut parsed) => {
@@ -1336,7 +1336,7 @@ mod tests {
 
     #[test]
     fn test_derive_ping_url_replaces_hostname() {
-        let result = derive_ping_url("http://halos.local:3000");
+        let result = derive_ping_url("http://test.example.local:3000");
         assert_eq!(
             result,
             Some("http://host.docker.internal:3000/".to_string())
@@ -1345,7 +1345,7 @@ mod tests {
 
     #[test]
     fn test_derive_ping_url_preserves_path() {
-        let result = derive_ping_url("http://halos.local:8086/api/v2");
+        let result = derive_ping_url("http://test.example.local:8086/api/v2");
         assert_eq!(
             result,
             Some("http://host.docker.internal:8086/api/v2".to_string())
@@ -1354,13 +1354,13 @@ mod tests {
 
     #[test]
     fn test_derive_ping_url_preserves_https() {
-        let result = derive_ping_url("https://halos.local:443/app");
+        let result = derive_ping_url("https://test.example.local:443/app");
         assert_eq!(result, Some("https://host.docker.internal/app".to_string()));
     }
 
     #[test]
     fn test_derive_ping_url_handles_no_port() {
-        let result = derive_ping_url("http://halos.local/dashboard");
+        let result = derive_ping_url("http://test.example.local/dashboard");
         assert_eq!(
             result,
             Some("http://host.docker.internal/dashboard".to_string())
