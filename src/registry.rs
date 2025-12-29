@@ -2,6 +2,14 @@
 //!
 //! Apps are defined in TOML files in `/etc/halos/webapps.d/`.
 //! This module handles loading, parsing, and watching registry files.
+//!
+//! ## Template Variables
+//!
+//! Registry files support Jinja-like template variables in URL fields:
+//! - `{{hostname}}` - Short hostname (e.g., "myhost")
+//! - `{{domain}}` - Full mDNS domain (e.g., "myhost.local")
+//!
+//! Example: `url = "https://cockpit.{{domain}}"`
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -151,6 +159,36 @@ impl AppDefinition {
     }
 }
 
+/// Get the system hostname (short form)
+fn get_hostname() -> String {
+    gethostname::gethostname()
+        .into_string()
+        .unwrap_or_else(|_| "localhost".to_string())
+        .split('.')
+        .next()
+        .unwrap_or("localhost")
+        .to_string()
+}
+
+/// Get the mDNS domain (hostname.local)
+fn get_domain() -> String {
+    format!("{}.local", get_hostname())
+}
+
+/// Expand template variables in a string
+///
+/// Supported templates:
+/// - `{{hostname}}` - Short hostname (e.g., "myhost")
+/// - `{{domain}}` - Full mDNS domain (e.g., "myhost.local")
+fn expand_templates(input: &str) -> String {
+    let hostname = get_hostname();
+    let domain = get_domain();
+
+    input
+        .replace("{{hostname}}", &hostname)
+        .replace("{{domain}}", &domain)
+}
+
 /// Load all app definitions from the registry directory
 pub fn load_all_apps<P: AsRef<Path>>(registry_dir: P) -> Result<Vec<RegistryEntry>> {
     let registry_dir = registry_dir.as_ref();
@@ -212,7 +250,7 @@ pub fn load_all_apps<P: AsRef<Path>>(registry_dir: P) -> Result<Vec<RegistryEntr
 fn load_app_file<P: AsRef<Path>>(path: P) -> Result<AppDefinition> {
     let path = path.as_ref();
     let contents = fs::read_to_string(path)?;
-    let app: AppDefinition = toml::from_str(&contents)?;
+    let mut app: AppDefinition = toml::from_str(&contents)?;
 
     // Validate required fields
     if app.name.is_empty() {
@@ -229,7 +267,10 @@ fn load_app_file<P: AsRef<Path>>(path: P) -> Result<AppDefinition> {
         )));
     }
 
-    // Validate URL format
+    // Expand template variables in URL (e.g., {{hostname}}, {{domain}})
+    app.url = expand_templates(&app.url);
+
+    // Validate URL format after template expansion
     Url::parse(&app.url).map_err(|e| {
         AdapterError::Config(format!("Invalid URL '{}' in {:?}: {}", app.url, path, e))
     })?;
@@ -539,5 +580,47 @@ url = "http://localhost:8082"
         assert!(visible_app.app.is_visible());
         assert!(!hidden_app.app.is_visible());
         assert!(!default_app.app.is_visible()); // default is false
+    }
+
+    #[test]
+    fn test_expand_templates_hostname() {
+        let hostname = get_hostname();
+        let input = "https://cockpit.{{hostname}}.local";
+        let expected = format!("https://cockpit.{}.local", hostname);
+        assert_eq!(expand_templates(input), expected);
+    }
+
+    #[test]
+    fn test_expand_templates_domain() {
+        let domain = get_domain();
+        let input = "https://cockpit.{{domain}}";
+        let expected = format!("https://cockpit.{}", domain);
+        assert_eq!(expand_templates(input), expected);
+    }
+
+    #[test]
+    fn test_expand_templates_no_templates() {
+        let input = "https://example.com:8080/path";
+        assert_eq!(expand_templates(input), input);
+    }
+
+    #[test]
+    fn test_load_app_with_template_url() {
+        let dir = TempDir::new().unwrap();
+        let domain = get_domain();
+
+        create_test_app_file(
+            dir.path(),
+            "templated-app",
+            r#"
+name = "Templated App"
+url = "https://app.{{domain}}"
+"#,
+        );
+
+        let entries = load_all_apps(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].app.name, "Templated App");
+        assert_eq!(entries[0].app.url, format!("https://app.{}", domain));
     }
 }
