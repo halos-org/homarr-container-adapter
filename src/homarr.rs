@@ -212,24 +212,6 @@ fn normalize_url(url_str: &str) -> String {
     }
 }
 
-/// Check if an item with the given ID already exists on the board.
-/// Used to prevent duplicate board items based on stable item ID.
-fn board_has_item_id(items: &[serde_json::Value], item_id: &str) -> bool {
-    items
-        .iter()
-        .any(|item| item.get("id").and_then(|id| id.as_str()) == Some(item_id))
-}
-
-/// Generate a stable item ID for an app.
-/// Uses container name if available, otherwise hashes the URL.
-fn generate_stable_item_id(app: &crate::registry::AppDefinition) -> String {
-    if let Some(container) = app.container_name() {
-        format!("registry-{}", container)
-    } else {
-        format!("registry-{:x}", string_hash(&app.url))
-    }
-}
-
 /// Check if a board already has an item for a given app ID.
 /// Used to prevent duplicate board items when the same app is synced multiple times.
 fn board_has_app(items: &[serde_json::Value], app_id: &str) -> bool {
@@ -955,12 +937,6 @@ impl HomarrClient {
     }
 
     /// Add a registry app to a board with layout preferences
-    ///
-    /// Deduplication strategy for board items:
-    /// 1. Check if board already has an item with the same appId - skip if so
-    /// 2. Check if board has an item with the same stable item ID (container name or URL hash)
-    ///    - If found, update that item's appId (handles URL changes)
-    /// 3. If neither found, create a new board item
     async fn add_registry_app_to_board(
         &self,
         app_id: &str,
@@ -969,32 +945,14 @@ impl HomarrClient {
     ) -> Result<()> {
         let board_items = self.get_board_items(board_name).await.unwrap_or_default();
 
-        // Generate stable item ID for this app
-        let item_id = generate_stable_item_id(app);
-
-        // Check if this app is already on the board (by Homarr appId)
+        // Check if this app is already on the board
         if board_has_app(&board_items, app_id) {
-            tracing::debug!(
-                "Registry app '{}' already on board '{}' (by appId), skipping",
+            tracing::info!(
+                "Registry app '{}' already on board '{}', skipping",
                 app.name,
                 board_name
             );
             return Ok(());
-        }
-
-        // Check if there's an existing item with the same stable ID but different appId
-        // This happens when the app URL changed and a new Homarr app was created
-        if board_has_item_id(&board_items, &item_id) {
-            tracing::info!(
-                "Found existing board item '{}' for app '{}' - updating appId to '{}'",
-                item_id,
-                app.name,
-                app_id
-            );
-            // Update the existing item's appId instead of creating a duplicate
-            return self
-                .update_board_item_app_id(board_name, &board_items, &item_id, app_id)
-                .await;
         }
 
         let board = self.get_board_by_name(board_name).await?;
@@ -1019,6 +977,14 @@ impl HomarrClient {
         let (x_offset, y_offset) = match (layout.x_offset, layout.y_offset) {
             (Some(x), Some(y)) => (x as i32, y as i32),
             _ => self.find_next_position(&board_items, 12), // 12 columns for new layout
+        };
+
+        // Generate a unique ID for this board item
+        // Use container name if available, otherwise use a hash of the URL
+        let item_id = if let Some(container) = app.container_name() {
+            format!("registry-{}", container)
+        } else {
+            format!("registry-{:x}", string_hash(&app.url))
         };
 
         let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
@@ -1062,60 +1028,6 @@ impl HomarrClient {
             y_offset,
             width,
             height
-        );
-
-        Ok(())
-    }
-
-    /// Update a board item's appId while preserving its position and other properties.
-    ///
-    /// This is used when the underlying Homarr app changed (e.g., URL changed and
-    /// a new app was created) but we want to keep the same board item.
-    async fn update_board_item_app_id(
-        &self,
-        board_name: &str,
-        board_items: &[serde_json::Value],
-        item_id: &str,
-        new_app_id: &str,
-    ) -> Result<()> {
-        let board = self.get_board_by_name(board_name).await?;
-
-        // Clone items and update the matching one
-        let items: Vec<serde_json::Value> = board_items
-            .iter()
-            .map(|item| {
-                let id = item.get("id").and_then(|id| id.as_str());
-                if id == Some(item_id) {
-                    // Update this item's appId
-                    let mut updated_item = item.clone();
-                    if let Some(options) = updated_item.get_mut("options") {
-                        if let Some(obj) = options.as_object_mut() {
-                            obj.insert("appId".to_string(), json!(new_app_id));
-                        }
-                    }
-                    updated_item
-                } else {
-                    item.clone()
-                }
-            })
-            .collect();
-
-        let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
-        let payload = json!({
-            "json": {
-                "id": board.id,
-                "sections": board.sections,
-                "items": items,
-                "integrations": []
-            }
-        });
-
-        self.post_json(&url, &payload).await?;
-
-        tracing::debug!(
-            "Updated board item '{}' with new appId '{}'",
-            item_id,
-            new_app_id
         );
 
         Ok(())
@@ -1651,111 +1563,5 @@ mod tests {
         let url_with_slash = normalize_url("http://localhost:3000/app/");
         let url_without_slash = normalize_url("http://localhost:3000/app");
         assert_eq!(url_with_slash, url_without_slash);
-    }
-
-    // Tests for board_has_item_id (issue #41 - duplicate board items)
-
-    #[test]
-    fn test_board_has_item_id_finds_existing() {
-        let items = vec![
-            json!({
-                "id": "registry-signalk",
-                "kind": "app",
-                "options": {
-                    "appId": "app-123"
-                }
-            }),
-            json!({
-                "id": "registry-grafana",
-                "kind": "app",
-                "options": {
-                    "appId": "app-456"
-                }
-            }),
-        ];
-
-        assert!(board_has_item_id(&items, "registry-signalk"));
-        assert!(board_has_item_id(&items, "registry-grafana"));
-        assert!(!board_has_item_id(&items, "registry-influxdb"));
-    }
-
-    #[test]
-    fn test_board_has_item_id_handles_empty_board() {
-        let items: Vec<serde_json::Value> = vec![];
-        assert!(!board_has_item_id(&items, "any-item-id"));
-    }
-
-    #[test]
-    fn test_board_has_item_id_handles_missing_id() {
-        let items = vec![json!({"kind": "app", "options": {"appId": "app-123"}})];
-        assert!(!board_has_item_id(&items, "any-item-id"));
-    }
-
-    // Tests for generate_stable_item_id
-
-    #[test]
-    fn test_generate_stable_item_id_with_container() {
-        use crate::registry::AppDefinition;
-
-        let app: AppDefinition = toml::from_str(
-            r#"
-            name = "Signal K"
-            url = "http://localhost:3000"
-            [type]
-            container_name = "signalk-server"
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(generate_stable_item_id(&app), "registry-signalk-server");
-    }
-
-    #[test]
-    fn test_generate_stable_item_id_without_container() {
-        use crate::registry::AppDefinition;
-
-        let app: AppDefinition = toml::from_str(
-            r#"
-            name = "External App"
-            url = "http://localhost:8080"
-            [type]
-            external = true
-            "#,
-        )
-        .unwrap();
-
-        let id = generate_stable_item_id(&app);
-        assert!(id.starts_with("registry-"));
-        // The hash portion should be consistent for the same URL
-        let id2 = generate_stable_item_id(&app);
-        assert_eq!(id, id2);
-    }
-
-    #[test]
-    fn test_generate_stable_item_id_consistent_hash() {
-        use crate::registry::AppDefinition;
-
-        // Same URL should produce same hash
-        let app1: AppDefinition = toml::from_str(
-            r#"
-            name = "App One"
-            url = "http://localhost:9999"
-            "#,
-        )
-        .unwrap();
-
-        let app2: AppDefinition = toml::from_str(
-            r#"
-            name = "App Two"
-            url = "http://localhost:9999"
-            "#,
-        )
-        .unwrap();
-
-        // Same URL = same hash-based ID (even with different names)
-        assert_eq!(
-            generate_stable_item_id(&app1),
-            generate_stable_item_id(&app2)
-        );
     }
 }
