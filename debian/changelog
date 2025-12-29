@@ -1,3 +1,11 @@
+homarr-container-adapter (0.2.0) unstable; urgency=medium
+
+  * Add template variable support in registry URLs
+  * Support {{hostname}} and {{domain}} templates for dynamic URLs
+  * Enables cockpit.toml to use url = "https://cockpit.{{domain}}"
+
+ -- Hat Labs Ltd <info@hatlabs.fi>  Sun, 29 Dec 2024 22:00:00 +0200
+
 homarr-container-adapter (0.1.0) unstable; urgency=medium
 
   * Initial release

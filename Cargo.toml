@@ -43,6 +43,9 @@ futures-util = "0.3"
 urlencoding = "2"
 url = "2"
 
+# System hostname
+gethostname = "0.5"
+
 # Password hashing for Authelia
 argon2 = "0.5"
 rand = "0.8"

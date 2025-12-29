@@ -1,0 +1,28 @@
+# Lintian overrides for homarr-container-adapter
+# This package uses a custom build process without full debhelper integration
+
+# Static Rust binary includes libyaml
+homarr-container-adapter: embedded-library *
+
+# Rust binary is statically linked and doesn't need explicit libc dep
+homarr-container-adapter: missing-dependency-on-libc *
+
+# Using simplified packaging without usr/share/doc
+homarr-container-adapter: no-changelog *
+homarr-container-adapter: no-copyright-file
+
+# Release build includes debug symbols for debugging
+homarr-container-adapter: unstripped-binary-or-object *
+
+# Custom build script, debhelper tokens are placeholders
+homarr-container-adapter: maintainer-script-has-unexpanded-debhelper-token *
+homarr-container-adapter: maintainer-script-calls-systemctl *
+
+# CLI tool, no manual page yet
+homarr-container-adapter: no-manual-page *
+
+# Package metadata uses simplified format
+homarr-container-adapter: recommended-field *
+
+# Hardening not applied to Rust cross-compiled binary
+homarr-container-adapter: hardening-no-fortify-functions *
