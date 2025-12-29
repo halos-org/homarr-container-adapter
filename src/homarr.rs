@@ -188,6 +188,30 @@ fn string_hash(s: &str) -> u64 {
     hasher.finish()
 }
 
+/// Normalize a URL for comparison to prevent duplicates from minor formatting differences.
+///
+/// Normalization includes:
+/// - Removing trailing slashes from path (unless path is just "/")
+/// - Lowercasing the hostname
+/// - Normalizing default ports (removes :80 for http, :443 for https)
+///
+/// Returns the normalized URL string, or the original if parsing fails.
+fn normalize_url(url_str: &str) -> String {
+    match url::Url::parse(url_str) {
+        Ok(mut parsed) => {
+            // Normalize path: remove trailing slash unless it's the root path
+            let path = parsed.path().to_string();
+            if path.len() > 1 && path.ends_with('/') {
+                parsed.set_path(path.trim_end_matches('/'));
+            }
+
+            // The url crate already lowercases the host and normalizes default ports
+            parsed.to_string()
+        }
+        Err(_) => url_str.to_string(),
+    }
+}
+
 /// Check if a board already has an item for a given app ID.
 /// Used to prevent duplicate board items when the same app is synced multiple times.
 fn board_has_app(items: &[serde_json::Value], app_id: &str) -> bool {
@@ -741,38 +765,84 @@ impl HomarrClient {
         Ok(boards.into_iter().filter(|b| b.is_writable()).collect())
     }
 
-    /// Find an existing app by URL in a pre-fetched list
-    fn find_app_in_list<'a>(apps: &'a [SelectableApp], url: &str) -> Option<&'a SelectableApp> {
-        apps.iter().find(|app| app.href.as_deref() == Some(url))
+    /// Find an existing app by URL in a pre-fetched list.
+    ///
+    /// Uses URL normalization to handle minor differences like trailing slashes.
+    /// Returns the matching app if found.
+    fn find_app_by_url<'a>(apps: &'a [SelectableApp], url: &str) -> Option<&'a SelectableApp> {
+        let normalized_url = normalize_url(url);
+        apps.iter().find(|app| {
+            app.href
+                .as_ref()
+                .map(|href| normalize_url(href) == normalized_url)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Find an existing app by name in a pre-fetched list.
+    ///
+    /// Used as fallback when URL matching fails (e.g., URL changed in package update).
+    /// Case-insensitive comparison.
+    fn find_app_by_name<'a>(apps: &'a [SelectableApp], name: &str) -> Option<&'a SelectableApp> {
+        let name_lower = name.to_lowercase();
+        apps.iter()
+            .find(|app| app.name.to_lowercase() == name_lower)
     }
 
     /// Add a registry app to Homarr (or update if already exists)
     ///
     /// Registry apps can have explicit layout positioning and may not be Docker containers.
+    ///
+    /// Deduplication strategy:
+    /// 1. First, try to find an existing app by normalized URL
+    /// 2. If not found, fall back to matching by app name (handles URL changes in package updates)
+    /// 3. If found, update the existing app and ensure it's on the board
+    /// 4. If not found at all, create a new app
     pub async fn add_registry_app(
         &self,
         app: &AppDefinition,
         board_name: &str,
         existing_apps: Option<&[SelectableApp]>,
     ) -> Result<String> {
-        // Check if an app with the same URL already exists
-        let existing = match existing_apps {
-            Some(apps) => Self::find_app_in_list(apps, &app.url).cloned(),
+        // Get or fetch the list of existing apps for deduplication
+        let apps_for_search: Vec<SelectableApp>;
+        let apps_ref = match existing_apps {
+            Some(apps) => apps,
             None => match self.get_all_apps().await {
-                Ok(apps) => Self::find_app_in_list(&apps, &app.url).cloned(),
+                Ok(apps) => {
+                    apps_for_search = apps;
+                    &apps_for_search
+                }
                 Err(e) => {
                     tracing::warn!(
                         "Failed to fetch existing apps for deduplication: {}. \
                              Proceeding with create.",
                         e
                     );
-                    None
+                    // Can't deduplicate without existing apps, will create new
+                    apps_for_search = vec![];
+                    &apps_for_search
                 }
             },
         };
 
+        // Try to find existing app: first by URL, then by name as fallback
+        let existing = Self::find_app_by_url(apps_ref, &app.url)
+            .or_else(|| {
+                // URL didn't match - try by name (handles URL changes in package updates)
+                let found_by_name = Self::find_app_by_name(apps_ref, &app.name);
+                if found_by_name.is_some() {
+                    tracing::info!(
+                        "App '{}' not found by URL, but found by name - will update existing app",
+                        app.name
+                    );
+                }
+                found_by_name
+            })
+            .cloned();
+
         if let Some(existing_app) = existing {
-            // App already exists - update it and ensure it's on the board
+            // App already exists - update it (including URL) and ensure it's on the board
             self.update_registry_app(&existing_app.id, app).await?;
             self.add_registry_app_to_board(&existing_app.id, app, board_name)
                 .await?;
@@ -1431,5 +1501,67 @@ mod tests {
         let board: BoardWithPermission = serde_json::from_str(json).unwrap();
         assert!(board.user_permissions.is_empty());
         assert!(board.group_permissions.is_empty());
+    }
+
+    // Tests for URL normalization (issue #41 - duplicate apps)
+
+    #[test]
+    fn test_normalize_url_removes_trailing_slash() {
+        assert_eq!(
+            normalize_url("http://localhost:3000/app/"),
+            "http://localhost:3000/app"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_preserves_root_path() {
+        // Root path "/" should not be stripped
+        assert_eq!(
+            normalize_url("http://localhost:3000/"),
+            "http://localhost:3000/"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_lowercases_host() {
+        assert_eq!(
+            normalize_url("http://MyHost.LOCAL:3000/App"),
+            "http://myhost.local:3000/App" // Note: path case preserved
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_removes_default_http_port() {
+        assert_eq!(normalize_url("http://localhost:80/"), "http://localhost/");
+    }
+
+    #[test]
+    fn test_normalize_url_removes_default_https_port() {
+        assert_eq!(
+            normalize_url("https://localhost:443/app"),
+            "https://localhost/app"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_preserves_non_default_port() {
+        assert_eq!(
+            normalize_url("http://localhost:3000/"),
+            "http://localhost:3000/"
+        );
+    }
+
+    #[test]
+    fn test_normalize_url_handles_invalid_url() {
+        // Should return original string for invalid URLs
+        assert_eq!(normalize_url("not-a-url"), "not-a-url");
+    }
+
+    #[test]
+    fn test_normalize_url_matching_with_trailing_slash_difference() {
+        // This is the key test for issue #41 - URLs that differ only by trailing slash
+        let url_with_slash = normalize_url("http://localhost:3000/app/");
+        let url_without_slash = normalize_url("http://localhost:3000/app");
+        assert_eq!(url_with_slash, url_without_slash);
     }
 }
