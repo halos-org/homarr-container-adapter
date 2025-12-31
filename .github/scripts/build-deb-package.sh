@@ -70,47 +70,11 @@ Description: Homarr dashboard adapter for HaLOS
   - Auto-adds containers with homarr.* labels to dashboard
 EOF
 
-        # Create postinst script
-        cat > "$PKG_DIR/DEBIAN/postinst" << "POSTINST"
-#!/bin/sh
-set -e
-
-case "$1" in
-    configure)
-        # Create state directory with proper permissions
-        mkdir -p /var/lib/homarr-container-adapter
-        chmod 755 /var/lib/homarr-container-adapter
-
-        # Enable and start the service
-        if [ -d /run/systemd/system ]; then
-            systemctl daemon-reload
-            systemctl enable homarr-container-adapter.service
-        fi
-        ;;
-esac
-
-#DEBHELPER#
-
-exit 0
-POSTINST
+        # Copy maintainer scripts from debian/
+        cp debian/postinst "$PKG_DIR/DEBIAN/postinst"
         chmod 755 "$PKG_DIR/DEBIAN/postinst"
 
-        # Create postrm script
-        cat > "$PKG_DIR/DEBIAN/postrm" << "POSTRM"
-#!/bin/sh
-set -e
-
-case "$1" in
-    purge)
-        rm -rf /var/lib/homarr-container-adapter
-        rm -rf /etc/homarr-container-adapter
-        ;;
-esac
-
-#DEBHELPER#
-
-exit 0
-POSTRM
+        cp debian/postrm "$PKG_DIR/DEBIAN/postrm"
         chmod 755 "$PKG_DIR/DEBIAN/postrm"
 
         # Build the package
