@@ -6,10 +6,20 @@ case "$1" in
         # Create state directory with proper permissions
         mkdir -p /var/lib/homarr-container-adapter
         chmod 755 /var/lib/homarr-container-adapter
-        # Service enablement is handled by dh_installsystemd via #DEBHELPER#
+
+        # Enable the systemd service
+        # Using deb-systemd-helper which works in chroots during image build
+        if command -v deb-systemd-helper >/dev/null 2>&1; then
+            deb-systemd-helper unmask 'homarr-container-adapter.service' >/dev/null || true
+            deb-systemd-helper enable 'homarr-container-adapter.service' >/dev/null || true
+        fi
+
+        # Start the service if systemd is running
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload >/dev/null || true
+            systemctl start homarr-container-adapter.service >/dev/null || true
+        fi
         ;;
 esac
-
-#DEBHELPER#
 
 exit 0
