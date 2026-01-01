@@ -17,7 +17,6 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/homarr-container-adapter
-ReadWritePaths=/var/lib/container-apps/halos-authelia-container/data
 PrivateTmp=true
 
 # Allow access to Docker socket
