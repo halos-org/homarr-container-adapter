@@ -19,10 +19,6 @@ pub struct State {
     #[serde(default)]
     pub first_boot_completed: bool,
 
-    /// Whether Authelia credential sync has been completed
-    #[serde(default)]
-    pub authelia_sync_completed: bool,
-
     /// Homarr API key for authentication
     /// Format: "{id}.{token}" (e.g., "abc123.randomtoken...")
     /// This is rotated from the bootstrap key on first boot.
