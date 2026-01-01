@@ -88,9 +88,6 @@ docker_socket = "/var/run/docker.sock"
 # Bootstrap API key file (from halos-homarr-branding package)
 bootstrap_api_key_file = "/etc/halos-homarr-branding/bootstrap-api-key"
 
-# Authelia users database file
-authelia_users_db = "/var/lib/container-apps/halos-authelia-container/data/users_database.yml"
-
 # Periodic sync interval in seconds (for watch mode)
 sync_interval = 15
 
