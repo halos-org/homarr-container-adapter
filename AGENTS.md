@@ -83,6 +83,29 @@ Note: If only one of `x_offset`/`y_offset` is specified, both are auto-calculate
 ./run help               # Show all available commands
 ```
 
+## Versioning
+
+**IMPORTANT**: Always use `./run bumpversion` to change versions. Never edit version files manually.
+
+```bash
+./run bumpversion patch    # Bump patch version (0.3.0 -> 0.3.1)
+./run bumpversion minor    # Bump minor version (0.3.0 -> 0.4.0)
+./run bumpversion major    # Bump major version (0.3.0 -> 1.0.0)
+```
+
+The command automatically commits the version change. Just push afterwards:
+```bash
+git push
+```
+
+**Note:** The working directory must be clean before bumping. This ensures atomic, isolated version commits.
+
+**Version files kept in sync by bumpversion:**
+- `VERSION` - Canonical source, read by CI
+- `Cargo.toml` - Rust package version
+
+**Note:** `debian/changelog` is generated dynamically by CI from the VERSION file.
+
 ## Packaging
 
 Native Debian package built with cargo-deb. See `debian/` directory.

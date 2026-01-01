@@ -80,8 +80,12 @@ EOF
         # Build the package
         dpkg-deb --build "$PKG_DIR"
 
-        # Rename to standard format
-        mv "${PKG_DIR}.deb" "${PACKAGE_NAME}_${DEB_VERSION}_arm64.deb"
+        # Rename to standard format (only if different)
+        SRC_DEB="${PKG_DIR}.deb"
+        DST_DEB="${PACKAGE_NAME}_${DEB_VERSION}_arm64.deb"
+        if [ "$SRC_DEB" != "$DST_DEB" ]; then
+            mv "$SRC_DEB" "$DST_DEB"
+        fi
 
         echo "=== Package built successfully ==="
         ls -la *.deb
