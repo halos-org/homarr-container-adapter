@@ -30,10 +30,6 @@ pub struct Config {
     #[serde(default = "default_registry_dir")]
     pub registry_dir: String,
 
-    /// Path to Authelia users database file
-    #[serde(default = "default_authelia_users_db")]
-    pub authelia_users_db: String,
-
     /// Path to bootstrap API key file (from halos-homarr-branding package)
     #[serde(default = "default_bootstrap_api_key_file")]
     pub bootstrap_api_key_file: String,
@@ -71,10 +67,6 @@ fn default_registry_dir() -> String {
     "/etc/halos/webapps.d".to_string()
 }
 
-fn default_authelia_users_db() -> String {
-    "/var/lib/container-apps/halos-authelia-container/data/users_database.yml".to_string()
-}
-
 fn default_bootstrap_api_key_file() -> String {
     "/etc/halos-homarr-branding/bootstrap-api-key".to_string()
 }
@@ -95,7 +87,6 @@ impl Default for Config {
             state_file: default_state_file(),
             docker_socket: default_docker_socket(),
             registry_dir: default_registry_dir(),
-            authelia_users_db: default_authelia_users_db(),
             bootstrap_api_key_file: default_bootstrap_api_key_file(),
             debug: false,
             sync_interval: default_sync_interval(),
