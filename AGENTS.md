@@ -106,6 +106,8 @@ git push
 
 **Note:** `debian/changelog` is generated dynamically by CI from the VERSION file.
 
+**CI Enforcement**: PRs that change package-affecting files must include a VERSION bump or CI will fail. Changes to docs, tests, CI config, and dev tooling are automatically excluded.
+
 ## Packaging
 
 Native Debian package built with cargo-deb. See `debian/` directory.
