@@ -80,7 +80,6 @@ pub struct Board {
 pub struct Settings {
     pub analytics: AnalyticsSettings,
     pub crawling: CrawlingSettings,
-    pub user: UserSettings,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,11 +96,6 @@ pub struct CrawlingSettings {
     pub no_follow: bool,
     pub no_translate: bool,
     pub no_sitelinks_search_box: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UserSettings {
-    pub enable_gravatar: bool,
 }
 
 impl BrandingConfig {
