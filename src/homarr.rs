@@ -405,6 +405,9 @@ impl HomarrClient {
                     "noFollow": branding.settings.crawling.no_follow,
                     "noTranslate": branding.settings.crawling.no_translate,
                     "noSiteLinksSearchBox": branding.settings.crawling.no_sitelinks_search_box
+                },
+                "user": {
+                    "enableGravatar": branding.settings.user.enable_gravatar
                 }
             }
         });

@@ -1,6 +1,6 @@
 [package]
 name = "homarr-container-adapter"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Hat Labs Ltd <info@hatlabs.fi>"]
 description = "Adapter for Homarr dashboard: first-boot setup and app registry sync"
