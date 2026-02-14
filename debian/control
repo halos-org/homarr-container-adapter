@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Hat Labs Ltd <info@hatlabs.fi>
 Build-Depends: debhelper-compat (= 13), cargo, rustc, libssl-dev, pkg-config
 Standards-Version: 4.6.0
-Homepage: https://github.com/hatlabs/homarr-container-adapter
+Homepage: https://github.com/halos-org/homarr-container-adapter
 
 Package: homarr-container-adapter
 Architecture: any
