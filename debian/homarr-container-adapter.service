@@ -1,6 +1,6 @@
 [Unit]
 Description=Homarr Container Adapter
-Documentation=https://github.com/hatlabs/homarr-container-adapter
+Documentation=https://github.com/halos-org/homarr-container-adapter
 After=network.target docker.service
 Wants=docker.service
 # Wait for Homarr to be ready (it needs a moment to start)
