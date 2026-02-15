@@ -1,7 +1,7 @@
 Source: homarr-container-adapter
 Section: admin
 Priority: optional
-Maintainer: Hat Labs Ltd <info@hatlabs.fi>
+Maintainer: Matti Airas <matti.airas@hatlabs.fi>
 Build-Depends: debhelper-compat (= 13), cargo, rustc, libssl-dev, pkg-config
 Standards-Version: 4.6.0
 Homepage: https://github.com/halos-org/homarr-container-adapter
