@@ -94,4 +94,4 @@ git commit --no-verify -m "WIP: message"
 
 ## License
 
-MIT License - Hat Labs Ltd
+MIT License - Matti Airas

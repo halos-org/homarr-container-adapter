@@ -2,7 +2,7 @@
 name = "homarr-container-adapter"
 version = "0.4.3"
 edition = "2021"
-authors = ["Hat Labs Ltd <info@hatlabs.fi>"]
+authors = ["Matti Airas <matti.airas@hatlabs.fi>"]
 description = "Adapter for Homarr dashboard: first-boot setup and app registry sync"
 license = "MIT"
 repository = "https://github.com/halos-org/homarr-container-adapter"

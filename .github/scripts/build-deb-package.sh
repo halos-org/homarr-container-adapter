@@ -57,7 +57,7 @@ docker run --rm \
 Package: ${PACKAGE_NAME}
 Version: ${DEB_VERSION}
 Architecture: arm64
-Maintainer: Hat Labs Ltd <info@hatlabs.fi>
+Maintainer: Matti Airas <matti.airas@hatlabs.fi>
 Depends: halos-homarr-branding
 Description: Homarr dashboard adapter for HaLOS
  Adapter service that handles first-boot setup and container
