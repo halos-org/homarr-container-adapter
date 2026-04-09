@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod homarr;
 mod registry;
+mod signalk;
 mod state;
 
 use std::collections::HashMap;
@@ -160,29 +161,93 @@ async fn run_sync(config: &Config) -> Result<()> {
         vec![]
     });
 
-    // Filter to visible apps only
-    let visible_apps: Vec<_> = registry_apps
+    // Discover Signal K webapps
+    // Some(apps) = SK reachable (may be empty), None = SK unreachable
+    let signalk_result = match config.signalk_url.as_deref() {
+        Some(url) if !url.is_empty() => {
+            info!("Discovering Signal K webapps from {}", url);
+            signalk::discover_webapps(url).await
+        }
+        _ => {
+            debug!("Signal K webapp discovery disabled (no signalk_url configured)");
+            None
+        }
+    };
+    let signalk_apps = signalk_result.as_deref().unwrap_or(&[]);
+
+    // Clean up stale Signal K webapps (only when SK was reachable)
+    if signalk_result.is_some() {
+        let current_sk_urls: std::collections::HashSet<&str> =
+            signalk_apps.iter().map(|a| a.url.as_str()).collect();
+
+        let stale_urls: Vec<String> = state
+            .discovered_apps
+            .iter()
+            .filter(|(url, _)| {
+                signalk::is_signalk_webapp_url(url) && !current_sk_urls.contains(url.as_str())
+            })
+            .map(|(url, _)| url.clone())
+            .collect();
+
+        for url in &stale_urls {
+            let app_name = state
+                .discovered_apps
+                .get(url)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // Try to find and delete the app in Homarr
+            if let Ok(apps) = client.get_all_apps().await {
+                if let Some(existing) = apps.iter().find(|a| {
+                    a.href
+                        .as_ref()
+                        .map(|h| homarr::normalize_url(h) == homarr::normalize_url(url))
+                        .unwrap_or(false)
+                }) {
+                    match client.delete_app(&existing.id).await {
+                        Ok(_) => info!("Removed stale Signal K webapp '{}' from Homarr", app_name),
+                        Err(e) => warn!("Failed to remove stale webapp '{}': {}", app_name, e),
+                    }
+                }
+            }
+
+            state.discovered_apps.remove(url);
+            info!(
+                "Removed stale Signal K webapp '{}' from discovered apps",
+                app_name
+            );
+        }
+    }
+
+    // Collect all visible apps: registry (filtered) + Signal K (always visible)
+    let visible_registry: Vec<_> = registry_apps
         .iter()
         .filter(|e| e.app.is_visible())
+        .map(|e| &e.app)
         .collect();
-    let hidden_count = registry_apps.len() - visible_apps.len();
+    let hidden_count = registry_apps.len() - visible_registry.len();
     if hidden_count > 0 {
         debug!(
-            "Filtered out {} hidden app(s) from {} total",
+            "Filtered out {} hidden app(s) from {} total registry apps",
             hidden_count,
             registry_apps.len()
         );
     }
 
+    let all_visible_apps: Vec<&registry::AppDefinition> = visible_registry
+        .into_iter()
+        .chain(signalk_apps.iter())
+        .collect();
+
     // Sync each visible app to each writable board
     let mut synced_count = 0;
-    for entry in &visible_apps {
+    for app in &all_visible_apps {
         // Track app in discovered_apps (once per app, not per board)
-        let container_id = entry.app.container_name().unwrap_or("").to_string();
+        let container_id = app.container_name().unwrap_or("").to_string();
         state.discovered_apps.insert(
-            entry.app.url.clone(),
+            app.url.clone(),
             state::DiscoveredApp {
-                name: entry.app.name.clone(),
+                name: app.name.clone(),
                 container_id,
                 added_at: chrono::Utc::now(),
             },
@@ -191,16 +256,16 @@ async fn run_sync(config: &Config) -> Result<()> {
         // Sync to each writable board
         for board in &writable_boards {
             // Check if app was removed from this specific board
-            if state.is_removed_from_board(&board.id, &entry.app.url) {
+            if state.is_removed_from_board(&board.id, &app.url) {
                 debug!(
                     "App '{}' was removed from board '{}', skipping",
-                    entry.app.name, board.name
+                    app.name, board.name
                 );
                 continue;
             }
 
             match client
-                .add_registry_app(&entry.app, &board.name, Some(&existing_apps))
+                .add_registry_app(app, &board.name, Some(&existing_apps))
                 .await
             {
                 Ok(_) => {
@@ -209,7 +274,7 @@ async fn run_sync(config: &Config) -> Result<()> {
                 Err(e) => {
                     warn!(
                         "Failed to add app '{}' to board '{}': {}",
-                        entry.app.name, board.name, e
+                        app.name, board.name, e
                     );
                 }
             }
@@ -220,8 +285,10 @@ async fn run_sync(config: &Config) -> Result<()> {
     state.save(&config.state_file)?;
 
     info!(
-        "Sync complete: {} visible app(s), {} app-board combinations synced",
-        visible_apps.len(),
+        "Sync complete: {} visible app(s) ({} registry, {} Signal K), {} app-board combinations synced",
+        all_visible_apps.len(),
+        all_visible_apps.len() - signalk_apps.len(),
+        signalk_apps.len(),
         synced_count
     );
     Ok(())
