@@ -34,6 +34,10 @@ pub struct Config {
     #[serde(default = "default_bootstrap_api_key_file")]
     pub bootstrap_api_key_file: String,
 
+    /// Signal K server URL for webapp discovery (None or empty to disable)
+    #[serde(default = "default_signalk_url")]
+    pub signalk_url: Option<String>,
+
     /// Enable debug logging
     #[serde(default)]
     pub debug: bool,
@@ -71,6 +75,10 @@ fn default_bootstrap_api_key_file() -> String {
     "/etc/halos-homarr-branding/bootstrap-api-key".to_string()
 }
 
+fn default_signalk_url() -> Option<String> {
+    Some("http://localhost:3000".to_string())
+}
+
 fn default_sync_interval() -> u64 {
     300 // 5 minutes - fallback for missed Docker events
 }
@@ -88,6 +96,7 @@ impl Default for Config {
             docker_socket: default_docker_socket(),
             registry_dir: default_registry_dir(),
             bootstrap_api_key_file: default_bootstrap_api_key_file(),
+            signalk_url: default_signalk_url(),
             debug: false,
             sync_interval: default_sync_interval(),
             startup_delay: default_startup_delay(),

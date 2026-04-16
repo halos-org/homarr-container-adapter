@@ -196,7 +196,7 @@ fn string_hash(s: &str) -> u64 {
 /// - Normalizing default ports (removes :80 for http, :443 for https)
 ///
 /// Returns the normalized URL string, or the original if parsing fails.
-fn normalize_url(url_str: &str) -> String {
+pub fn normalize_url(url_str: &str) -> String {
     match url::Url::parse(url_str) {
         Ok(mut parsed) => {
             // Normalize path: remove trailing slash unless it's the root path
@@ -933,6 +933,29 @@ impl HomarrClient {
             app.name,
             app_id
         );
+        Ok(())
+    }
+
+    /// Delete an app from Homarr's global registry
+    pub async fn delete_app(&self, app_id: &str) -> Result<()> {
+        let url = format!("{}/api/trpc/app.delete", self.base_url);
+        let payload = json!({
+            "json": {
+                "id": app_id
+            }
+        });
+
+        let response = self.post_json(&url, &payload).await?;
+
+        if !response.status().is_success() {
+            let text = response.text().await?;
+            return Err(AdapterError::HomarrApi(format!(
+                "Failed to delete app '{}': {}",
+                app_id, text
+            )));
+        }
+
+        tracing::info!("Deleted app from Homarr (app_id: {})", app_id);
         Ok(())
     }
 
