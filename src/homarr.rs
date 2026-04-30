@@ -163,10 +163,22 @@ impl BoardWithPermission {
 const DEFAULT_ICON: &str = "/icons/docker.svg";
 
 /// Derive a host.docker.internal-based ping URL from the app URL.
-/// Replaces the hostname with host.docker.internal so Homarr container can reach the app.
-/// Note: Requires `extra_hosts: ["host.docker.internal:host-gateway"]` in Homarr's docker-compose.yml
-/// Example: "http://myhost.local:3000/path" -> "http://host.docker.internal:3000/path"
+///
+/// For absolute URLs, replaces the hostname with `host.docker.internal` so
+/// the Homarr container can reach the app. For path-only URLs (e.g.,
+/// `/cockpit/`), builds `https://host.docker.internal<path>` directly —
+/// path-only entries are HaLOS-internal apps routed by Traefik on 443.
+///
+/// Requires `extra_hosts: ["host.docker.internal:host-gateway"]` in Homarr's
+/// docker-compose.yml.
+///
+/// Examples:
+/// - `"http://myhost.local:3000/path"` -> `"http://host.docker.internal:3000/path"`
+/// - `"/cockpit/"` -> `"https://host.docker.internal/cockpit/"`
 fn derive_ping_url(app_url: &str) -> Option<String> {
+    if crate::registry::is_path_only(app_url) {
+        return Some(format!("https://host.docker.internal{}", app_url));
+    }
     match url::Url::parse(app_url) {
         Ok(mut parsed) => {
             if parsed.set_host(Some("host.docker.internal")).is_ok() {
@@ -889,8 +901,9 @@ impl HomarrClient {
             .await?;
 
         tracing::info!(
-            "Added registry app '{}' to Homarr (app_id: {})",
+            "Added registry app '{}' (href={}) to Homarr (app_id: {})",
             app.name,
+            app.url,
             app_id
         );
         Ok(app_id)
@@ -929,8 +942,9 @@ impl HomarrClient {
         }
 
         tracing::info!(
-            "Updated existing registry app '{}' (app_id: {})",
+            "Updated existing registry app '{}' (href={}) (app_id: {})",
             app.name,
+            app.url,
             app_id
         );
         Ok(())
@@ -1463,6 +1477,39 @@ mod tests {
     #[test]
     fn test_derive_ping_url_invalid_url_returns_none() {
         let result = derive_ping_url("not-a-valid-url");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_derive_ping_url_path_only() {
+        let result = derive_ping_url("/cockpit/");
+        assert_eq!(
+            result,
+            Some("https://host.docker.internal/cockpit/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_derive_ping_url_path_only_signalk() {
+        let result = derive_ping_url("/signalk-server/@signalk/freeboard-sk/");
+        assert_eq!(
+            result,
+            Some("https://host.docker.internal/signalk-server/@signalk/freeboard-sk/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_derive_ping_url_protocol_relative_returns_none() {
+        // `//host/path` must not be treated as path-only.
+        let result = derive_ping_url("//evil.example.com/path");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_derive_ping_url_lone_slash_returns_none() {
+        // Lone `/` is rejected by `is_path_only` and falls through to
+        // `Url::parse`, which also rejects it. Both call sites agree.
+        let result = derive_ping_url("/");
         assert_eq!(result, None);
     }
 

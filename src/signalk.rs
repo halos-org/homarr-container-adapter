@@ -97,13 +97,16 @@ fn build_icon_url(package_name: &str, app_icon: Option<&str>) -> String {
     }
 }
 
-/// Build the user-facing URL through Traefik path-prefix redirect.
+/// Build the user-facing path-only URL through Traefik path-prefix redirect.
 ///
-/// Example: `https://myhost.local/signalk-server/@signalk/freeboard-sk/`
+/// Returning a path-only URL lets the browser resolve it against whichever
+/// hostname the user is currently using (mDNS, VPN FQDN, DHCP-DNS), which is
+/// the multi-hostname access goal.
+///
+/// Example: `/signalk-server/@signalk/freeboard-sk/`
 fn build_webapp_url(location: &str) -> String {
-    let domain = get_domain();
     let location = location.trim_start_matches('/');
-    format!("https://{}{}/{}", domain, SIGNALK_PATH_PREFIX, location)
+    format!("{}/{}", SIGNALK_PATH_PREFIX, location)
 }
 
 /// Build the ping URL for health checks from within Docker.
@@ -240,11 +243,19 @@ mod tests {
     }
 
     #[test]
-    fn test_build_webapp_url() {
-        // Uses actual system hostname, so just verify structure
-        let url = build_webapp_url("/@signalk/freeboard-sk/");
-        assert!(url.starts_with("https://"));
-        assert!(url.contains("/signalk-server/@signalk/freeboard-sk/"));
+    fn test_build_webapp_url_path_only() {
+        assert_eq!(
+            build_webapp_url("/@signalk/freeboard-sk/"),
+            "/signalk-server/@signalk/freeboard-sk/"
+        );
+    }
+
+    #[test]
+    fn test_build_webapp_url_no_leading_slash() {
+        assert_eq!(
+            build_webapp_url("@signalk/freeboard-sk/"),
+            "/signalk-server/@signalk/freeboard-sk/"
+        );
     }
 
     #[test]
@@ -372,9 +383,7 @@ mod tests {
 
         // Freeboard-SK uses displayName
         assert_eq!(apps[0].name, "Freeboard-SK");
-        assert!(apps[0]
-            .url
-            .contains("/signalk-server/@signalk/freeboard-sk/"));
+        assert_eq!(apps[0].url, "/signalk-server/@signalk/freeboard-sk/");
         let icon = apps[0].icon_url.as_ref().unwrap();
         assert!(icon.contains("/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png"));
         assert!(icon.starts_with("https://"));

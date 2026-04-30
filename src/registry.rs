@@ -3,6 +3,18 @@
 //! Apps are defined in TOML files in `/etc/halos/webapps.d/`.
 //! This module handles loading, parsing, and watching registry files.
 //!
+//! ## Accepted URL forms
+//!
+//! Registry `url` fields accept either:
+//! - An absolute URL (e.g., `https://example.com/path`) — used for external
+//!   links where the hostname is meaningful.
+//! - A path-only URL starting with a single `/` followed by a non-`/`
+//!   character (e.g., `/cockpit/`) — resolved by the browser against the
+//!   current origin, enabling multi-hostname access for HaLOS-internal apps.
+//!
+//! Protocol-relative (`//host/path`), bare strings, and a lone `/` are
+//! rejected.
+//!
 //! ## Template Variables
 //!
 //! Registry files support Jinja-like template variables in URL fields:
@@ -270,12 +282,33 @@ fn load_app_file<P: AsRef<Path>>(path: P) -> Result<AppDefinition> {
     // Expand template variables in URL (e.g., {{hostname}}, {{domain}})
     app.url = expand_templates(&app.url);
 
-    // Validate URL format after template expansion
-    Url::parse(&app.url).map_err(|e| {
+    // Validate URL format after template expansion. Accept absolute URLs or
+    // path-only URLs (starting with a single `/` followed by a non-`/` char).
+    validate_app_url(&app.url).map_err(|e| {
         AdapterError::Config(format!("Invalid URL '{}' in {:?}: {}", app.url, path, e))
     })?;
 
     Ok(app)
+}
+
+/// Validate that an app URL is either an absolute URL or a path-only URL.
+///
+/// Path-only URLs must start with `/` followed by a non-`/` character, so a
+/// lone `/` and protocol-relative `//host/...` forms are rejected.
+fn validate_app_url(url: &str) -> std::result::Result<(), String> {
+    if is_path_only(url) {
+        return Ok(());
+    }
+    Url::parse(url).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// True iff `url` starts with `/` and the second character (if any) is not `/`.
+///
+/// Shared with `homarr::derive_ping_url` so both call sites agree on what
+/// counts as path-only — most importantly that a lone `/` is *not*.
+pub(crate) fn is_path_only(url: &str) -> bool {
+    let mut chars = url.chars();
+    chars.next() == Some('/') && chars.next().is_some_and(|c| c != '/')
 }
 
 /// Get apps as a HashMap keyed by URL (for deduplication)
@@ -602,6 +635,65 @@ url = "http://localhost:8082"
     fn test_expand_templates_no_templates() {
         let input = "https://example.com:8080/path";
         assert_eq!(expand_templates(input), input);
+    }
+
+    #[test]
+    fn test_load_app_path_only_url() {
+        let dir = TempDir::new().unwrap();
+        create_test_app_file(
+            dir.path(),
+            "cockpit",
+            r#"
+name = "Cockpit"
+url = "/cockpit/"
+"#,
+        );
+        create_test_app_file(
+            dir.path(),
+            "freeboard",
+            r#"
+name = "Freeboard"
+url = "/signalk-server/@signalk/freeboard-sk/"
+"#,
+        );
+
+        let entries = load_all_apps(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        let urls: Vec<&str> = entries.iter().map(|e| e.app.url.as_str()).collect();
+        assert!(urls.contains(&"/cockpit/"));
+        assert!(urls.contains(&"/signalk-server/@signalk/freeboard-sk/"));
+    }
+
+    #[test]
+    fn test_path_only_root_rejected() {
+        assert!(validate_app_url("/").is_err());
+    }
+
+    #[test]
+    fn test_protocol_relative_rejected() {
+        assert!(validate_app_url("//evil.example.com/path").is_err());
+    }
+
+    #[test]
+    fn test_bare_path_without_leading_slash_rejected() {
+        assert!(validate_app_url("cockpit/").is_err());
+    }
+
+    #[test]
+    fn test_bare_string_rejected() {
+        assert!(validate_app_url("not-a-url").is_err());
+    }
+
+    #[test]
+    fn test_absolute_url_accepted() {
+        assert!(validate_app_url("https://example.com/path").is_ok());
+        assert!(validate_app_url("http://localhost:8080").is_ok());
+    }
+
+    #[test]
+    fn test_path_only_accepted() {
+        assert!(validate_app_url("/cockpit/").is_ok());
+        assert!(validate_app_url("/signalk-server/@signalk/freeboard-sk/").is_ok());
     }
 
     #[test]
