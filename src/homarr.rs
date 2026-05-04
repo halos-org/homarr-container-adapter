@@ -227,12 +227,35 @@ pub fn normalize_url(url_str: &str) -> String {
 /// Check if a board already has an item for a given app ID.
 /// Used to prevent duplicate board items when the same app is synced multiple times.
 fn board_has_app(items: &[serde_json::Value], app_id: &str) -> bool {
-    items.iter().any(|item| {
-        item.get("options")
-            .and_then(|o| o.get("appId"))
-            .and_then(|a| a.as_str())
-            == Some(app_id)
-    })
+    items.iter().any(|item| item_app_id(item) == Some(app_id))
+}
+
+/// Extract the `options.appId` string from a board item, if present.
+fn item_app_id(item: &serde_json::Value) -> Option<&str> {
+    item.get("options")
+        .and_then(|o| o.get("appId"))
+        .and_then(|a| a.as_str())
+}
+
+/// Split board items into (kept, removed_count) for items pointing at `app_id`.
+#[allow(dead_code)] // wired up in delete_app_and_orphan_items (Unit 4 call sites)
+fn partition_items_by_app_id(
+    items: Vec<serde_json::Value>,
+    app_id: &str,
+) -> (Vec<serde_json::Value>, usize) {
+    let mut removed = 0;
+    let kept = items
+        .into_iter()
+        .filter(|item| {
+            if item_app_id(item) == Some(app_id) {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (kept, removed)
 }
 
 /// Transform icon paths to relative URLs for Homarr.
@@ -951,6 +974,13 @@ impl HomarrClient {
     }
 
     /// Delete an app from Homarr's global registry
+    ///
+    /// Note: this is the bare delete and does NOT remove board items pointing
+    /// at the deleted appId. Production callers should use
+    /// [`delete_app_and_orphan_items`](Self::delete_app_and_orphan_items) so
+    /// orphan items don't render as "No app" placeholders. This bare variant
+    /// is kept available for tests and any future caller that explicitly
+    /// wants global-only deletion.
     pub async fn delete_app(&self, app_id: &str) -> Result<()> {
         let url = format!("{}/api/trpc/app.delete", self.base_url);
         let payload = json!({
@@ -970,6 +1000,67 @@ impl HomarrClient {
         }
 
         tracing::info!("Deleted app from Homarr (app_id: {})", app_id);
+        Ok(())
+    }
+
+    /// Delete an app and remove any board items on `board_name` that point
+    /// at it.
+    ///
+    /// Homarr's `app.delete` does not cascade to board items, so a bare
+    /// delete leaves orphan items rendering as "No app" placeholders. This
+    /// wrapper performs the cascade: delete the global app first, then
+    /// rewrite the board with the orphan items filtered out.
+    ///
+    /// Order rationale: deleting the app first is the more correct
+    /// semantics (the global app is gone before any board references it
+    /// without a target). If the board write fails after a successful
+    /// delete, the global app is already removed; the next sync sees no
+    /// orphan-creator and the residual orphan items remain until something
+    /// else cleans them up. Recovery from that rare partial failure is out
+    /// of scope.
+    #[allow(dead_code)] // wired into main.rs SK-cleanup loop in Unit 4
+    pub async fn delete_app_and_orphan_items(&self, app_id: &str, board_name: &str) -> Result<()> {
+        // Read board state up front so we can attribute orphan-item counts
+        // to a specific board even if the global delete is the only action
+        // ultimately performed.
+        let board_items = self.get_board_items(board_name).await.unwrap_or_default();
+        let (filtered, orphan_count) = partition_items_by_app_id(board_items, app_id);
+
+        // Delete the global app row first.
+        self.delete_app(app_id).await?;
+
+        // If no items reference this app on this board, nothing to rewrite.
+        if orphan_count == 0 {
+            return Ok(());
+        }
+
+        let board = self.get_board_by_name(board_name).await?;
+
+        let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
+        let payload = json!({
+            "json": {
+                "id": board.id,
+                "sections": board.sections,
+                "items": filtered,
+                "integrations": []
+            }
+        });
+
+        let response = self.post_json(&url, &payload).await?;
+        if !response.status().is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "Failed to save board '{}' after deleting app '{}': {}",
+                board_name, app_id, text
+            )));
+        }
+
+        tracing::info!(
+            "Removed {} orphan board item(s) on '{}' after deleting app_id={}",
+            orphan_count,
+            board_name,
+            app_id
+        );
         Ok(())
     }
 
@@ -1437,6 +1528,66 @@ mod tests {
 
         // Should not crash and should return false for all
         assert!(!board_has_app(&items, "any-app-id"));
+    }
+
+    // Tests for partition_items_by_app_id (cascade-delete helper)
+
+    fn item_for_app(item_id: &str, app_id: &str) -> serde_json::Value {
+        json!({
+            "id": item_id,
+            "kind": "app",
+            "options": {"appId": app_id}
+        })
+    }
+
+    #[test]
+    fn test_partition_items_keeps_unrelated() {
+        let items = vec![item_for_app("a", "keep-1"), item_for_app("b", "keep-2")];
+        let (kept, removed) = partition_items_by_app_id(items, "target");
+        assert_eq!(removed, 0);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn test_partition_items_removes_matching_app() {
+        let items = vec![item_for_app("a", "target"), item_for_app("b", "keep")];
+        let (kept, removed) = partition_items_by_app_id(items, "target");
+        assert_eq!(removed, 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(item_app_id(&kept[0]), Some("keep"));
+    }
+
+    #[test]
+    fn test_partition_items_removes_multiple_for_same_app() {
+        // Defensive: should not happen in practice, but if multiple items
+        // point at the same app_id, all are filtered out.
+        let items = vec![
+            item_for_app("a", "target"),
+            item_for_app("b", "target"),
+            item_for_app("c", "keep"),
+        ];
+        let (kept, removed) = partition_items_by_app_id(items, "target");
+        assert_eq!(removed, 2);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn test_partition_items_handles_malformed_items() {
+        let items = vec![
+            json!({"id": "no-options"}),
+            json!({"id": "empty-options", "options": {}}),
+            item_for_app("real", "target"),
+        ];
+        let (kept, removed) = partition_items_by_app_id(items, "target");
+        assert_eq!(removed, 1);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn test_partition_items_empty_input() {
+        let (kept, removed) = partition_items_by_app_id(vec![], "target");
+        assert_eq!(removed, 0);
+        assert!(kept.is_empty());
     }
 
     // Tests for derive_ping_url (auto-derive host.docker.internal URL for health checks)
