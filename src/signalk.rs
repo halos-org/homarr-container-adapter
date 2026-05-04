@@ -26,13 +26,40 @@ const SIGNALK_PATH_PREFIX: &str = "/signalk-server";
 /// The Signal K Server tile itself has URL `https://<domain>/signalk-server/` (no
 /// further path), so we distinguish by checking for path segments after the prefix.
 pub fn is_signalk_webapp_url(url: &str) -> bool {
-    if let Some(rest) = url.split(SIGNALK_PATH_PREFIX).nth(1) {
-        // The SK Server tile's rest is just "/" — webapp URLs have more
-        let trimmed = rest.trim_matches('/');
-        !trimmed.is_empty()
-    } else {
-        false
+    signalk_webapp_identity(url).is_some()
+}
+
+/// Return the canonical SK-webapp path identity for a URL, or `None` if the URL
+/// is not a Signal K webapp URL.
+///
+/// The identity spans absolute and path-only URL forms so callers can compare
+/// "is this the same SK webapp?" across the URL-format transition introduced
+/// when adapter cards moved from absolute URLs to path-only hrefs.
+///
+/// Identity is the sub-path after `/signalk-server/`, with a leading slash and
+/// no trailing slash. Example:
+/// - `"https://host/signalk-server/@signalk/freeboard-sk/"` → `Some("/@signalk/freeboard-sk")`
+/// - `"/signalk-server/@signalk/freeboard-sk"`             → `Some("/@signalk/freeboard-sk")`
+/// - `"https://host/signalk-server/"` (SK Server tile)     → `None`
+/// - `"https://host/grafana/"` or `"/cockpit/"`            → `None`
+///
+/// SK package names are case-sensitive, so identity comparison is
+/// case-sensitive.
+pub fn signalk_webapp_identity(url: &str) -> Option<String> {
+    // Find the part after the SK path prefix. `split` is used (rather than
+    // `url::Url::parse`) so this works for both absolute and path-only inputs.
+    let rest = url.split(SIGNALK_PATH_PREFIX).nth(1)?;
+
+    // Strip any query/fragment so identity is path-only.
+    let path = rest.split(['?', '#']).next().unwrap_or(rest);
+
+    // Trim slashes; if nothing remains, this is the SK Server tile, not a webapp.
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return None;
     }
+
+    Some(format!("/{}", trimmed))
 }
 
 // --- Signal K API response types ---
@@ -270,6 +297,62 @@ mod tests {
     async fn test_discover_webapps_unreachable_returns_none() {
         let result = discover_webapps("http://127.0.0.1:1").await;
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_signalk_webapp_identity_absolute_and_path_only_match() {
+        let abs =
+            signalk_webapp_identity("https://myhost.local/signalk-server/@signalk/freeboard-sk/");
+        let path_only = signalk_webapp_identity("/signalk-server/@signalk/freeboard-sk/");
+        assert!(abs.is_some());
+        assert_eq!(abs, path_only);
+        assert_eq!(abs.as_deref(), Some("/@signalk/freeboard-sk"));
+    }
+
+    #[test]
+    fn test_signalk_webapp_identity_trailing_slash_irrelevant() {
+        let with = signalk_webapp_identity("/signalk-server/@signalk/freeboard-sk/");
+        let without = signalk_webapp_identity("/signalk-server/@signalk/freeboard-sk");
+        assert_eq!(with, without);
+    }
+
+    #[test]
+    fn test_signalk_webapp_identity_strips_query_and_fragment() {
+        assert_eq!(
+            signalk_webapp_identity("/signalk-server/@signalk/freeboard-sk/?foo=bar"),
+            Some("/@signalk/freeboard-sk".to_string())
+        );
+        assert_eq!(
+            signalk_webapp_identity("https://host/signalk-server/@signalk/freeboard-sk/#section"),
+            Some("/@signalk/freeboard-sk".to_string())
+        );
+    }
+
+    #[test]
+    fn test_signalk_webapp_identity_rejects_sk_server_tile() {
+        assert_eq!(
+            signalk_webapp_identity("https://myhost.local/signalk-server/"),
+            None
+        );
+        assert_eq!(signalk_webapp_identity("/signalk-server/"), None);
+        assert_eq!(signalk_webapp_identity("/signalk-server"), None);
+    }
+
+    #[test]
+    fn test_signalk_webapp_identity_rejects_non_sk_urls() {
+        assert_eq!(signalk_webapp_identity("/cockpit/"), None);
+        assert_eq!(signalk_webapp_identity("https://host/grafana/"), None);
+        assert_eq!(signalk_webapp_identity(""), None);
+        assert_eq!(signalk_webapp_identity("not-a-url"), None);
+    }
+
+    #[test]
+    fn test_signalk_webapp_identity_case_sensitive() {
+        // SK package names are case-sensitive; identity must reflect that.
+        assert_ne!(
+            signalk_webapp_identity("/signalk-server/@signalk/Freeboard-SK/"),
+            signalk_webapp_identity("/signalk-server/@signalk/freeboard-sk/")
+        );
     }
 
     #[test]
