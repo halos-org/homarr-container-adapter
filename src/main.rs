@@ -123,6 +123,18 @@ async fn run_sync(config: &Config) -> Result<()> {
         state = state::State::load(&config.state_file)?;
     }
 
+    // One-shot housekeeping: collapse discovered_apps duplicates that
+    // accumulated when the same logical app was synced under multiple URL
+    // forms (e.g., absolute URL on the first run, path-only after upgrade).
+    let pruned = state.prune_duplicate_discovered_apps();
+    if pruned > 0 {
+        info!(
+            "State prune: collapsed {} duplicate discovered_apps entries",
+            pruned
+        );
+        state.save(&config.state_file)?;
+    }
+
     // Create client and set up authentication
     let mut client = homarr::HomarrClient::new(&config.homarr_url)?;
     ensure_authenticated(&mut client, config, &mut state).await?;

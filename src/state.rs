@@ -116,6 +116,49 @@ impl State {
     pub fn update_sync_time(&mut self) {
         self.last_sync = Some(Utc::now());
     }
+
+    /// Collapse `discovered_apps` entries that share the same `(name,
+    /// container_id)` identity, keeping the most-recently-added one.
+    ///
+    /// Repairs cruft accumulated when the same logical app was synced under
+    /// multiple URL forms (e.g., absolute URL on the first run, path-only
+    /// URL after upgrading the adapter). Returns the number of entries
+    /// removed so callers can decide whether to log or persist.
+    ///
+    /// SK webapps have empty `container_id`, so identity collapses to
+    /// `name`, which is stable for SK webapps. Non-SK apps have a stable
+    /// container name across URL changes.
+    pub fn prune_duplicate_discovered_apps(&mut self) -> usize {
+        // Group URLs by (name, container_id) so we can compare added_at
+        // timestamps across the group and keep the newest.
+        let mut groups: HashMap<(String, String), Vec<String>> = HashMap::new();
+        for (url, app) in &self.discovered_apps {
+            groups
+                .entry((app.name.clone(), app.container_id.clone()))
+                .or_default()
+                .push(url.clone());
+        }
+
+        let mut removed = 0;
+        for urls in groups.values() {
+            if urls.len() < 2 {
+                continue;
+            }
+            // Find the URL with the latest added_at; drop the rest.
+            let newest = urls
+                .iter()
+                .max_by_key(|u| self.discovered_apps[*u].added_at)
+                .cloned()
+                .expect("group is non-empty");
+            for url in urls {
+                if url != &newest {
+                    self.discovered_apps.remove(url);
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
 }
 
 #[cfg(test)]
@@ -296,6 +339,108 @@ mod tests {
 
         // Different container ID with same URL should still be considered removed
         // (we track by URL, not container_id)
+    }
+
+    // Tests for prune_duplicate_discovered_apps (Unit 5)
+
+    fn discovered(name: &str, container_id: &str, added_at: DateTime<Utc>) -> DiscoveredApp {
+        DiscoveredApp {
+            name: name.to_string(),
+            container_id: container_id.to_string(),
+            added_at,
+        }
+    }
+
+    #[test]
+    fn test_prune_duplicates_no_op_when_unique() {
+        let mut state = State::default();
+        let now = Utc::now();
+        state
+            .discovered_apps
+            .insert("/cockpit/".into(), discovered("Cockpit", "cockpit", now));
+        state
+            .discovered_apps
+            .insert("/avnav/".into(), discovered("AvNav", "avnav", now));
+
+        assert_eq!(state.prune_duplicate_discovered_apps(), 0);
+        assert_eq!(state.discovered_apps.len(), 2);
+    }
+
+    #[test]
+    fn test_prune_duplicates_keeps_newest() {
+        let mut state = State::default();
+        let older = Utc::now() - chrono::Duration::days(1);
+        let newer = Utc::now();
+        state.discovered_apps.insert(
+            "https://host/cockpit/".into(),
+            discovered("Cockpit", "cockpit", older),
+        );
+        state
+            .discovered_apps
+            .insert("/cockpit/".into(), discovered("Cockpit", "cockpit", newer));
+
+        assert_eq!(state.prune_duplicate_discovered_apps(), 1);
+        assert_eq!(state.discovered_apps.len(), 1);
+        assert!(state.discovered_apps.contains_key("/cockpit/"));
+    }
+
+    #[test]
+    fn test_prune_duplicates_three_or_more_collapse_to_one() {
+        let mut state = State::default();
+        let t0 = Utc::now() - chrono::Duration::days(2);
+        let t1 = Utc::now() - chrono::Duration::days(1);
+        let t2 = Utc::now();
+        state
+            .discovered_apps
+            .insert("url-0".into(), discovered("App", "container", t0));
+        state
+            .discovered_apps
+            .insert("url-1".into(), discovered("App", "container", t1));
+        state
+            .discovered_apps
+            .insert("url-2".into(), discovered("App", "container", t2));
+
+        assert_eq!(state.prune_duplicate_discovered_apps(), 2);
+        assert_eq!(state.discovered_apps.len(), 1);
+        assert!(state.discovered_apps.contains_key("url-2"));
+    }
+
+    #[test]
+    fn test_prune_duplicates_signalk_webapp_empty_container_id() {
+        // SK webapps share empty container_id; identity collapses to name.
+        let mut state = State::default();
+        let older = Utc::now() - chrono::Duration::days(1);
+        let newer = Utc::now();
+        state.discovered_apps.insert(
+            "https://host/signalk-server/@signalk/freeboard-sk/".into(),
+            discovered("Freeboard-SK", "", older),
+        );
+        state.discovered_apps.insert(
+            "/signalk-server/@signalk/freeboard-sk/".into(),
+            discovered("Freeboard-SK", "", newer),
+        );
+        // A different SK webapp with the same empty container_id but
+        // different name must NOT be pruned.
+        state.discovered_apps.insert(
+            "/signalk-server/@mxtommy/kip/".into(),
+            discovered("KIP", "", newer),
+        );
+
+        assert_eq!(state.prune_duplicate_discovered_apps(), 1);
+        assert_eq!(state.discovered_apps.len(), 2);
+        assert!(state
+            .discovered_apps
+            .contains_key("/signalk-server/@signalk/freeboard-sk/"));
+        assert!(state
+            .discovered_apps
+            .contains_key("/signalk-server/@mxtommy/kip/"));
+    }
+
+    #[test]
+    fn test_prune_duplicates_empty_state_is_noop() {
+        let mut state = State::default();
+        assert_eq!(state.prune_duplicate_discovered_apps(), 0);
+        assert!(state.discovered_apps.is_empty());
     }
 
     #[test]
