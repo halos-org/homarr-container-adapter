@@ -144,14 +144,20 @@ impl State {
             if urls.len() < 2 {
                 continue;
             }
-            // Find the URL with the latest added_at; drop the rest.
-            let newest = urls
+            // Pick the latest added_at; on ties, prefer the lexicographically
+            // smaller URL so the choice is deterministic across runs (HashMap
+            // iteration order is not).
+            let survivor = urls
                 .iter()
-                .max_by_key(|u| self.discovered_apps[*u].added_at)
+                .max_by(|a, b| {
+                    let ta = self.discovered_apps[*a].added_at;
+                    let tb = self.discovered_apps[*b].added_at;
+                    ta.cmp(&tb).then_with(|| b.cmp(a))
+                })
                 .cloned()
                 .expect("group is non-empty");
             for url in urls {
-                if url != &newest {
+                if url != &survivor {
                     self.discovered_apps.remove(url);
                     removed += 1;
                 }
@@ -434,6 +440,40 @@ mod tests {
         assert!(state
             .discovered_apps
             .contains_key("/signalk-server/@mxtommy/kip/"));
+    }
+
+    #[test]
+    fn test_prune_duplicates_tie_break_lex_smaller_url_wins() {
+        // Two entries with identical added_at. Tie-break must be
+        // deterministic; the smaller URL by lexicographic order wins.
+        let mut state = State::default();
+        let same = Utc::now();
+        state.discovered_apps.insert(
+            "https://host/cockpit/".into(),
+            discovered("Cockpit", "cockpit", same),
+        );
+        state
+            .discovered_apps
+            .insert("/cockpit/".into(), discovered("Cockpit", "cockpit", same));
+
+        // Run the prune many times across fresh HashMaps to exercise the
+        // randomized iteration order; the outcome must be consistent.
+        for _ in 0..16 {
+            let mut s = State::default();
+            s.discovered_apps.insert(
+                "https://host/cockpit/".into(),
+                discovered("Cockpit", "cockpit", same),
+            );
+            s.discovered_apps
+                .insert("/cockpit/".into(), discovered("Cockpit", "cockpit", same));
+            assert_eq!(s.prune_duplicate_discovered_apps(), 1);
+            assert_eq!(s.discovered_apps.len(), 1);
+            assert!(s.discovered_apps.contains_key("/cockpit/"));
+        }
+
+        // Also pin the original.
+        assert_eq!(state.prune_duplicate_discovered_apps(), 1);
+        assert!(state.discovered_apps.contains_key("/cockpit/"));
     }
 
     #[test]

@@ -126,13 +126,14 @@ async fn run_sync(config: &Config) -> Result<()> {
     // One-shot housekeeping: collapse discovered_apps duplicates that
     // accumulated when the same logical app was synced under multiple URL
     // forms (e.g., absolute URL on the first run, path-only after upgrade).
+    // The end-of-run state.save persists the pruned map together with
+    // sync_time, so no separate save here.
     let pruned = state.prune_duplicate_discovered_apps();
     if pruned > 0 {
         info!(
             "State prune: collapsed {} duplicate discovered_apps entries",
             pruned
         );
-        state.save(&config.state_file)?;
     }
 
     // Create client and set up authentication
@@ -257,91 +258,7 @@ async fn run_sync(config: &Config) -> Result<()> {
     // only state.json entries that look stale are genuinely-uninstalled
     // webapps.
     if signalk_result.is_some() {
-        let current_sk_identities: std::collections::HashSet<String> = signalk_apps
-            .iter()
-            .filter_map(|a| signalk::signalk_webapp_identity(&a.url))
-            .collect();
-
-        let stale_urls: Vec<String> = state
-            .discovered_apps
-            .iter()
-            .filter(|(url, _)| {
-                let Some(identity) = signalk::signalk_webapp_identity(url) else {
-                    return false;
-                };
-                !current_sk_identities.contains(&identity)
-            })
-            .map(|(url, _)| url.clone())
-            .collect();
-
-        if !stale_urls.is_empty() {
-            // Re-fetch apps so we see post-sync state (URL forms updated).
-            let apps_after_sync = client.get_all_apps().await.unwrap_or_default();
-            let board_names: Vec<&str> = writable_boards.iter().map(|b| b.name.as_str()).collect();
-
-            for url in &stale_urls {
-                let app_name = state
-                    .discovered_apps
-                    .get(url)
-                    .map(|a| a.name.clone())
-                    .unwrap_or_else(|| "unknown".to_string());
-
-                let state_identity = signalk::signalk_webapp_identity(url);
-                let existing = apps_after_sync
-                    .iter()
-                    .find(|a| {
-                        a.href
-                            .as_ref()
-                            .map(|h| homarr::normalize_url(h) == homarr::normalize_url(url))
-                            .unwrap_or(false)
-                    })
-                    .or_else(|| {
-                        let identity = state_identity.as_ref()?;
-                        apps_after_sync.iter().find(|a| {
-                            a.href
-                                .as_ref()
-                                .and_then(|h| signalk::signalk_webapp_identity(h))
-                                .map(|id| &id == identity)
-                                .unwrap_or(false)
-                        })
-                    });
-
-                let cascade_result = match existing {
-                    Some(existing) => {
-                        client
-                            .delete_app_and_orphan_items(&existing.id, &board_names)
-                            .await
-                    }
-                    None => {
-                        // App was already gone in Homarr (manual cleanup,
-                        // crash mid-sync, etc.) — treat as success so we
-                        // can prune the state entry.
-                        Ok(())
-                    }
-                };
-
-                match cascade_result {
-                    Ok(_) => {
-                        state.discovered_apps.remove(url);
-                        info!(
-                            "Removed stale Signal K webapp '{}' from Homarr and discovered apps",
-                            app_name
-                        );
-                    }
-                    Err(e) => {
-                        // Keep the state entry so a subsequent sync retries
-                        // the cascade for this URL. This is an intentional
-                        // change from prior behavior (which dropped the
-                        // entry unconditionally and prevented retry).
-                        warn!(
-                            "Failed to remove stale webapp '{}': {} \
-                             (state entry kept for retry)",
-                            app_name, e
-                        );
-                    }
-                }
-            }
-        }
+        cleanup_stale_signalk_webapps(&client, &mut state, signalk_apps, &writable_boards).await;
     }
 
     state.update_sync_time();
@@ -355,6 +272,130 @@ async fn run_sync(config: &Config) -> Result<()> {
         synced_count
     );
     Ok(())
+}
+
+/// Compute the URLs in `discovered_apps` that look like SK webapps but
+/// are no longer in `current_sk_identities`.
+///
+/// Pure function — extracted so the staleness rule is independently
+/// testable from the orchestration in `cleanup_stale_signalk_webapps`.
+fn compute_stale_sk_urls(
+    discovered_apps: &std::collections::HashMap<String, state::DiscoveredApp>,
+    current_sk_identities: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    discovered_apps
+        .iter()
+        .filter(|(url, _)| {
+            let Some(identity) = signalk::signalk_webapp_identity(url) else {
+                return false;
+            };
+            !current_sk_identities.contains(&identity)
+        })
+        .map(|(url, _)| url.clone())
+        .collect()
+}
+
+/// Remove stale Signal K webapps from Homarr and from `state.discovered_apps`.
+///
+/// Cascade-deletes the corresponding Homarr app row (and any board items
+/// pointing at it) for each stale URL. State entries are pruned only on
+/// successful cascade; on failure the entry is retained so the next sync
+/// can retry.
+///
+/// Recovery property: even if a prior sync's cascade left orphan items on
+/// some board, the next sync's call here will re-find the app row (the
+/// cascade is sweep-first, so the row is still there on partial failure)
+/// and re-attempt the sweep idempotently. If the row is genuinely missing
+/// — e.g., a human deleted it manually — the loop still calls the cascade
+/// with whatever app_id resolution it can find via the snapshot, and only
+/// prunes state when the call returns Ok.
+async fn cleanup_stale_signalk_webapps(
+    client: &homarr::HomarrClient,
+    state: &mut state::State,
+    signalk_apps: &[registry::AppDefinition],
+    writable_boards: &[homarr::BoardWithPermission],
+) {
+    let current_sk_identities: std::collections::HashSet<String> = signalk_apps
+        .iter()
+        .filter_map(|a| signalk::signalk_webapp_identity(&a.url))
+        .collect();
+
+    let stale_urls = compute_stale_sk_urls(&state.discovered_apps, &current_sk_identities);
+    if stale_urls.is_empty() {
+        return;
+    }
+
+    // Re-fetch apps so we see post-sync state (URL forms updated). Bail
+    // out of cleanup if the fetch fails — pruning state without a fresh
+    // app list could orphan items, leak global app rows, or both.
+    let mut apps_after_sync = match client.get_all_apps().await {
+        Ok(apps) => apps,
+        Err(e) => {
+            warn!(
+                "Skipping stale-SK cleanup: failed to refetch apps ({}). \
+                 State entries retained for retry.",
+                e
+            );
+            return;
+        }
+    };
+
+    let board_names: Vec<&str> = writable_boards.iter().map(|b| b.name.as_str()).collect();
+
+    for url in &stale_urls {
+        let app_name = state
+            .discovered_apps
+            .get(url)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Match against the live snapshot using the same two-tier rule
+        // the sync loop uses, so future changes to the matcher stay
+        // consistent across both call sites.
+        let existing_id =
+            homarr::HomarrClient::find_app_by_url(&apps_after_sync, url).map(|a| a.id.clone());
+
+        let cascade_result = match &existing_id {
+            Some(id) => client.delete_app_and_orphan_items(id, &board_names).await,
+            None => {
+                // App row is already gone in Homarr (manual cleanup,
+                // prior partial cascade, etc.). Treat as success — the
+                // sweep-first cascade ordering means a partial-failure
+                // retry sees `existing_id.is_some()` and re-sweeps; an
+                // app-already-gone state has nothing left to sweep
+                // because the prior successful cascade already swept
+                // before deleting.
+                Ok(())
+            }
+        };
+
+        match cascade_result {
+            Ok(_) => {
+                state.discovered_apps.remove(url);
+                if let Some(id) = existing_id {
+                    // Drop the matched app from the local snapshot so a
+                    // subsequent stale URL in this loop that resolves to
+                    // the same row does not re-target a now-deleted id.
+                    apps_after_sync.retain(|a| a.id != id);
+                }
+                info!(
+                    "Removed stale Signal K webapp '{}' from Homarr and discovered apps",
+                    app_name
+                );
+            }
+            Err(e) => {
+                // Keep the state entry so the next sync retries the
+                // cascade. Sweep-first ordering means the global app row
+                // is still present on partial failure, so the retry will
+                // re-find it via find_app_by_url and re-attempt.
+                warn!(
+                    "Failed to remove stale webapp '{}': {} \
+                     (state entry kept for retry)",
+                    app_name, e
+                );
+            }
+        }
+    }
 }
 
 /// Ensure the Homarr client is authenticated with a valid API key.
@@ -619,4 +660,84 @@ async fn list_containers(docker: &Docker) -> Result<Vec<String>> {
         .collect();
 
     Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    fn discovered(name: &str) -> state::DiscoveredApp {
+        state::DiscoveredApp {
+            name: name.to_string(),
+            container_id: String::new(),
+            added_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_compute_stale_sk_urls_excludes_non_sk() {
+        let mut apps = HashMap::new();
+        apps.insert("/cockpit/".to_string(), discovered("Cockpit"));
+        apps.insert(
+            "/signalk-server/@signalk/freeboard-sk/".to_string(),
+            discovered("Freeboard-SK"),
+        );
+        let mut current = HashSet::new();
+        current.insert("/@signalk/freeboard-sk".to_string());
+
+        let stale = compute_stale_sk_urls(&apps, &current);
+        // Cockpit is not an SK URL; the SK webapp's identity matches
+        // current, so neither is stale.
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn test_compute_stale_sk_urls_matches_across_url_form() {
+        // State holds absolute URL; current SK identities derived from
+        // path-only URLs. The identity-based filter must consider this
+        // entry "current", not stale.
+        let mut apps = HashMap::new();
+        apps.insert(
+            "https://host.local/signalk-server/@signalk/freeboard-sk/".to_string(),
+            discovered("Freeboard-SK"),
+        );
+        let mut current = HashSet::new();
+        current.insert("/@signalk/freeboard-sk".to_string());
+
+        assert!(compute_stale_sk_urls(&apps, &current).is_empty());
+    }
+
+    #[test]
+    fn test_compute_stale_sk_urls_flags_uninstalled_webapp() {
+        let mut apps = HashMap::new();
+        apps.insert(
+            "/signalk-server/@signalk/freeboard-sk/".to_string(),
+            discovered("Freeboard-SK"),
+        );
+        apps.insert(
+            "/signalk-server/@mxtommy/kip/".to_string(),
+            discovered("KIP"),
+        );
+        // Only freeboard-sk is currently installed.
+        let mut current = HashSet::new();
+        current.insert("/@signalk/freeboard-sk".to_string());
+
+        let stale = compute_stale_sk_urls(&apps, &current);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0], "/signalk-server/@mxtommy/kip/");
+    }
+
+    #[test]
+    fn test_compute_stale_sk_urls_ignores_sk_server_tile() {
+        // The bare /signalk-server/ path is the SK Server tile, not a
+        // webapp; never stale per signalk_webapp_identity returning None.
+        let mut apps = HashMap::new();
+        apps.insert(
+            "https://host.local/signalk-server/".to_string(),
+            discovered("Signal K Server"),
+        );
+        let current = HashSet::new();
+        assert!(compute_stale_sk_urls(&apps, &current).is_empty());
+    }
 }
