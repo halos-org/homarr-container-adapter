@@ -1036,24 +1036,39 @@ impl HomarrClient {
     /// orphan-creator and the residual orphan items remain until something
     /// else cleans them up. Recovery from that rare partial failure is out
     /// of scope.
-    #[allow(dead_code)] // wired into main.rs SK-cleanup loop in Unit 4
-    pub async fn delete_app_and_orphan_items(&self, app_id: &str, board_name: &str) -> Result<()> {
-        // Read board state up front so we can attribute orphan-item counts
-        // to a specific board even if the global delete is the only action
-        // ultimately performed.
-        let board_items = self.get_board_items(board_name).await.unwrap_or_default();
-        let (filtered, orphan_count) = partition_items_by_app_id(board_items, app_id);
-
-        // Delete the global app row first.
+    pub async fn delete_app_and_orphan_items(
+        &self,
+        app_id: &str,
+        board_names: &[&str],
+    ) -> Result<()> {
+        // Delete the global app row first. Subsequent board sweeps remove
+        // any items still pointing at this now-deleted appId.
         self.delete_app(app_id).await?;
 
-        // If no items reference this app on this board, nothing to rewrite.
+        for board_name in board_names {
+            if let Err(e) = self.sweep_orphan_items(app_id, board_name).await {
+                tracing::warn!(
+                    "Failed to sweep orphan items for app_id={} on board '{}': {}",
+                    app_id,
+                    board_name,
+                    e
+                );
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove board items pointing at `app_id` from `board_name` if any
+    /// exist. No-op when the board has no orphan items.
+    async fn sweep_orphan_items(&self, app_id: &str, board_name: &str) -> Result<()> {
+        let board_items = self.get_board_items(board_name).await.unwrap_or_default();
+        let (filtered, orphan_count) = partition_items_by_app_id(board_items, app_id);
         if orphan_count == 0 {
             return Ok(());
         }
 
         let board = self.get_board_by_name(board_name).await?;
-
         let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
         let payload = json!({
             "json": {
