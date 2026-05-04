@@ -177,14 +177,23 @@ async fn run_sync(config: &Config) -> Result<()> {
 
     // Clean up stale Signal K webapps (only when SK was reachable)
     if signalk_result.is_some() {
-        let current_sk_urls: std::collections::HashSet<&str> =
-            signalk_apps.iter().map(|a| a.url.as_str()).collect();
+        // Build the set of identities currently advertised by SK so we can
+        // recognize "still current under a different URL form" (the
+        // absolute → path-only transition). A state URL is stale only when
+        // its SK identity is not in this set.
+        let current_sk_identities: std::collections::HashSet<String> = signalk_apps
+            .iter()
+            .filter_map(|a| signalk::signalk_webapp_identity(&a.url))
+            .collect();
 
         let stale_urls: Vec<String> = state
             .discovered_apps
             .iter()
             .filter(|(url, _)| {
-                signalk::is_signalk_webapp_url(url) && !current_sk_urls.contains(url.as_str())
+                let Some(identity) = signalk::signalk_webapp_identity(url) else {
+                    return false;
+                };
+                !current_sk_identities.contains(&identity)
             })
             .map(|(url, _)| url.clone())
             .collect();
@@ -196,14 +205,31 @@ async fn run_sync(config: &Config) -> Result<()> {
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| "unknown".to_string());
 
-            // Try to find and delete the app in Homarr
+            // Try to find and delete the app in Homarr. Match by normalized
+            // URL first; if the app row was already migrated to a different
+            // URL form (path-only vs absolute), fall back to SK identity.
+            let state_identity = signalk::signalk_webapp_identity(url);
             if let Ok(apps) = client.get_all_apps().await {
-                if let Some(existing) = apps.iter().find(|a| {
-                    a.href
-                        .as_ref()
-                        .map(|h| homarr::normalize_url(h) == homarr::normalize_url(url))
-                        .unwrap_or(false)
-                }) {
+                let existing = apps
+                    .iter()
+                    .find(|a| {
+                        a.href
+                            .as_ref()
+                            .map(|h| homarr::normalize_url(h) == homarr::normalize_url(url))
+                            .unwrap_or(false)
+                    })
+                    .or_else(|| {
+                        let identity = state_identity.as_ref()?;
+                        apps.iter().find(|a| {
+                            a.href
+                                .as_ref()
+                                .and_then(|h| signalk::signalk_webapp_identity(h))
+                                .map(|id| &id == identity)
+                                .unwrap_or(false)
+                        })
+                    });
+
+                if let Some(existing) = existing {
                     match client.delete_app(&existing.id).await {
                         Ok(_) => info!("Removed stale Signal K webapp '{}' from Homarr", app_name),
                         Err(e) => warn!("Failed to remove stale webapp '{}': {}", app_name, e),

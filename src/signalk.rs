@@ -19,16 +19,6 @@ const DEFAULT_ICON: &str = "/icons/docker.svg";
 /// Traefik path prefix for Signal K server
 const SIGNALK_PATH_PREFIX: &str = "/signalk-server";
 
-/// Check if a URL looks like a Signal K webapp URL (discovered by this module).
-///
-/// SK webapp URLs follow the pattern: `https://<domain>/signalk-server/<location>`
-/// where location is a package mount path like `/@signalk/freeboard-sk/`.
-/// The Signal K Server tile itself has URL `https://<domain>/signalk-server/` (no
-/// further path), so we distinguish by checking for path segments after the prefix.
-pub fn is_signalk_webapp_url(url: &str) -> bool {
-    signalk_webapp_identity(url).is_some()
-}
-
 /// Return the canonical SK-webapp path identity for a URL, or `None` if the URL
 /// is not a Signal K webapp URL.
 ///
@@ -356,28 +346,11 @@ mod tests {
     }
 
     #[test]
-    fn test_is_signalk_webapp_url() {
-        // SK webapp URLs
-        assert!(is_signalk_webapp_url(
-            "https://myhost.local/signalk-server/@signalk/freeboard-sk/"
-        ));
-        assert!(is_signalk_webapp_url(
-            "https://myhost.local/signalk-server/@mxtommy/kip/"
-        ));
-        // Non-scoped package
-        assert!(is_signalk_webapp_url(
-            "https://myhost.local/signalk-server/some-webapp/"
-        ));
-
-        // Signal K Server tile itself — NOT a webapp URL
-        assert!(!is_signalk_webapp_url(
-            "https://myhost.local/signalk-server/"
-        ));
-
-        // Other URLs
-        assert!(!is_signalk_webapp_url("https://myhost.local/grafana/"));
-        assert!(!is_signalk_webapp_url("http://localhost:3000"));
-        assert!(!is_signalk_webapp_url(""));
+    fn test_signalk_webapp_identity_non_scoped_package() {
+        assert_eq!(
+            signalk_webapp_identity("https://myhost.local/signalk-server/some-webapp/"),
+            Some("/some-webapp".to_string())
+        );
     }
 
     #[test]

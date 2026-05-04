@@ -802,14 +802,32 @@ impl HomarrClient {
 
     /// Find an existing app by URL in a pre-fetched list.
     ///
-    /// Uses URL normalization to handle minor differences like trailing slashes.
-    /// Returns the matching app if found.
+    /// Two-tier matching:
+    /// 1. Normalized URL equality — handles trailing-slash and host-case
+    ///    differences for absolute URLs.
+    /// 2. Signal K identity match — if `url` is a Signal K webapp URL, also
+    ///    match against any app whose `href` shares the same SK identity.
+    ///    This spans the absolute → path-only URL transition so an existing
+    ///    app row with `href = "https://host/signalk-server/foo/"` matches
+    ///    an incoming `app.url = "/signalk-server/foo/"` and the appId is
+    ///    preserved across the format change.
     fn find_app_by_url<'a>(apps: &'a [SelectableApp], url: &str) -> Option<&'a SelectableApp> {
         let normalized_url = normalize_url(url);
-        apps.iter().find(|app| {
+        if let Some(app) = apps.iter().find(|app| {
             app.href
                 .as_ref()
                 .map(|href| normalize_url(href) == normalized_url)
+                .unwrap_or(false)
+        }) {
+            return Some(app);
+        }
+
+        let sk_identity = crate::signalk::signalk_webapp_identity(url)?;
+        apps.iter().find(|app| {
+            app.href
+                .as_ref()
+                .and_then(|h| crate::signalk::signalk_webapp_identity(h))
+                .map(|id| id == sk_identity)
                 .unwrap_or(false)
         })
     }
@@ -1254,6 +1272,75 @@ mod tests {
     fn test_client_new_preserves_path() {
         let client = HomarrClient::new("http://localhost:7575/homarr").unwrap();
         assert_eq!(client.base_url, "http://localhost:7575/homarr");
+    }
+
+    // find_app_by_url tests
+
+    fn selectable(id: &str, name: &str, href: Option<&str>) -> SelectableApp {
+        SelectableApp {
+            id: id.to_string(),
+            name: name.to_string(),
+            icon_url: "/icons/docker.svg".to_string(),
+            href: href.map(|h| h.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_find_app_by_url_normalized_match() {
+        let apps = vec![selectable(
+            "app-1",
+            "Cockpit",
+            Some("https://host.local/cockpit"),
+        )];
+        let found = HomarrClient::find_app_by_url(&apps, "https://host.local/cockpit/");
+        assert_eq!(found.map(|a| a.id.as_str()), Some("app-1"));
+    }
+
+    #[test]
+    fn test_find_app_by_url_sk_identity_absolute_to_path_only() {
+        // Existing app row stored under absolute URL; sync arrives with
+        // path-only URL. SK-identity fallback must match.
+        let apps = vec![selectable(
+            "sk-1",
+            "Freeboard-SK",
+            Some("https://host.local/signalk-server/@signalk/freeboard-sk/"),
+        )];
+        let found = HomarrClient::find_app_by_url(&apps, "/signalk-server/@signalk/freeboard-sk/");
+        assert_eq!(found.map(|a| a.id.as_str()), Some("sk-1"));
+    }
+
+    #[test]
+    fn test_find_app_by_url_sk_identity_path_only_to_absolute() {
+        // Reverse direction also works.
+        let apps = vec![selectable(
+            "sk-1",
+            "Freeboard-SK",
+            Some("/signalk-server/@signalk/freeboard-sk/"),
+        )];
+        let found = HomarrClient::find_app_by_url(
+            &apps,
+            "https://host.local/signalk-server/@signalk/freeboard-sk/",
+        );
+        assert_eq!(found.map(|a| a.id.as_str()), Some("sk-1"));
+    }
+
+    #[test]
+    fn test_find_app_by_url_sk_identity_does_not_match_different_webapp() {
+        let apps = vec![selectable(
+            "sk-1",
+            "Freeboard-SK",
+            Some("https://host.local/signalk-server/@signalk/freeboard-sk/"),
+        )];
+        let found = HomarrClient::find_app_by_url(&apps, "/signalk-server/@mxtommy/kip/");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_app_by_url_no_match_for_non_sk_url_format_transition() {
+        // Non-SK paths don't get the SK-identity fallback.
+        let apps = vec![selectable("a-1", "Cockpit", Some("/cockpit/"))];
+        let found = HomarrClient::find_app_by_url(&apps, "https://host.local/cockpit/");
+        assert!(found.is_none());
     }
 
     // find_next_position tests
