@@ -227,12 +227,34 @@ pub fn normalize_url(url_str: &str) -> String {
 /// Check if a board already has an item for a given app ID.
 /// Used to prevent duplicate board items when the same app is synced multiple times.
 fn board_has_app(items: &[serde_json::Value], app_id: &str) -> bool {
-    items.iter().any(|item| {
-        item.get("options")
-            .and_then(|o| o.get("appId"))
-            .and_then(|a| a.as_str())
-            == Some(app_id)
-    })
+    items.iter().any(|item| item_app_id(item) == Some(app_id))
+}
+
+/// Extract the `options.appId` string from a board item, if present.
+fn item_app_id(item: &serde_json::Value) -> Option<&str> {
+    item.get("options")
+        .and_then(|o| o.get("appId"))
+        .and_then(|a| a.as_str())
+}
+
+/// Split board items into (kept, removed_count) for items pointing at `app_id`.
+fn partition_items_by_app_id(
+    items: Vec<serde_json::Value>,
+    app_id: &str,
+) -> (Vec<serde_json::Value>, usize) {
+    let mut removed = 0;
+    let kept = items
+        .into_iter()
+        .filter(|item| {
+            if item_app_id(item) == Some(app_id) {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (kept, removed)
 }
 
 /// Transform icon paths to relative URLs for Homarr.
@@ -779,14 +801,44 @@ impl HomarrClient {
 
     /// Find an existing app by URL in a pre-fetched list.
     ///
-    /// Uses URL normalization to handle minor differences like trailing slashes.
-    /// Returns the matching app if found.
-    fn find_app_by_url<'a>(apps: &'a [SelectableApp], url: &str) -> Option<&'a SelectableApp> {
+    /// Two-tier matching:
+    /// 1. Normalized URL equality — handles trailing-slash and host-case
+    ///    differences for absolute URLs.
+    /// 2. Signal K identity match — if `url` is a Signal K webapp URL, also
+    ///    match against any app whose `href` shares the same SK identity.
+    ///    This spans the absolute → path-only URL transition so an existing
+    ///    app row with `href = "https://host/signalk-server/foo/"` matches
+    ///    an incoming `app.url = "/signalk-server/foo/"` and the appId is
+    ///    preserved across the format change.
+    ///
+    /// The SK-identity tier excludes candidate hrefs containing a query
+    /// string or fragment. The adapter never emits such hrefs, so a match
+    /// at that path is a human-customized variant (e.g., `?embed=1`) that
+    /// should not be claimed by the cascade.
+    pub(crate) fn find_app_by_url<'a>(
+        apps: &'a [SelectableApp],
+        url: &str,
+    ) -> Option<&'a SelectableApp> {
         let normalized_url = normalize_url(url);
-        apps.iter().find(|app| {
+        if let Some(app) = apps.iter().find(|app| {
             app.href
                 .as_ref()
                 .map(|href| normalize_url(href) == normalized_url)
+                .unwrap_or(false)
+        }) {
+            return Some(app);
+        }
+
+        let sk_identity = crate::signalk::signalk_webapp_identity(url)?;
+        apps.iter().find(|app| {
+            let Some(href) = app.href.as_ref() else {
+                return false;
+            };
+            if href.contains('?') || href.contains('#') {
+                return false;
+            }
+            crate::signalk::signalk_webapp_identity(href)
+                .map(|id| id == sk_identity)
                 .unwrap_or(false)
         })
     }
@@ -951,6 +1003,13 @@ impl HomarrClient {
     }
 
     /// Delete an app from Homarr's global registry
+    ///
+    /// Note: this is the bare delete and does NOT remove board items pointing
+    /// at the deleted appId. Production callers should use
+    /// [`delete_app_and_orphan_items`](Self::delete_app_and_orphan_items) so
+    /// orphan items don't render as "No app" placeholders. This bare variant
+    /// is kept available for tests and any future caller that explicitly
+    /// wants global-only deletion.
     pub async fn delete_app(&self, app_id: &str) -> Result<()> {
         let url = format!("{}/api/trpc/app.delete", self.base_url);
         let payload = json!({
@@ -970,6 +1029,100 @@ impl HomarrClient {
         }
 
         tracing::info!("Deleted app from Homarr (app_id: {})", app_id);
+        Ok(())
+    }
+
+    /// Delete an app and remove any board items pointing at it across the
+    /// given boards.
+    ///
+    /// `board_names` should be the writable-board set the caller wants
+    /// swept; passing an empty slice degrades to a global-only delete (no
+    /// board sweep). Future callers should treat the slice as the cascade
+    /// scope, not as a hint.
+    ///
+    /// **Order: sweep boards first, then delete the global app.** A
+    /// pre-delete sweep removes the items pointing at the soon-to-be-
+    /// deleted appId before the row vanishes, so a sweep failure aborts
+    /// the cascade with the global app still intact and the next sync
+    /// can re-find it via [`find_app_by_url`](Self::find_app_by_url) and
+    /// retry idempotently. The reverse order would leave orphan items
+    /// stranded when the board write fails after a successful delete:
+    /// subsequent syncs would not find the global app row and could not
+    /// re-sweep without persisting the prior app_id.
+    ///
+    /// Per-board errors are accumulated: every board is attempted before
+    /// the cascade returns. If any sweep failed, the global delete is
+    /// skipped and the first error is returned. The pre-delete sweep is
+    /// idempotent — boards already swept on a prior attempt are no-ops.
+    pub async fn delete_app_and_orphan_items(
+        &self,
+        app_id: &str,
+        board_names: &[&str],
+    ) -> Result<()> {
+        let mut first_error: Option<AdapterError> = None;
+        for board_name in board_names {
+            if let Err(e) = self.sweep_orphan_items(app_id, board_name).await {
+                tracing::warn!(
+                    "Failed to sweep orphan items for app_id={} on board '{}': {}",
+                    app_id,
+                    board_name,
+                    e
+                );
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+
+        if let Some(e) = first_error {
+            // Leave the global app intact so the caller's retry path can
+            // re-find it on the next sync and re-attempt the cascade.
+            return Err(e);
+        }
+
+        // All boards swept clean — safe to delete the global row.
+        self.delete_app(app_id).await
+    }
+
+    /// Remove board items pointing at `app_id` from `board_name` if any
+    /// exist. No-op when the board has no orphan items.
+    ///
+    /// Propagates `get_board_items` errors (rather than silently treating
+    /// a fetch failure as an empty board) so the caller's retry path can
+    /// observe the failure.
+    async fn sweep_orphan_items(&self, app_id: &str, board_name: &str) -> Result<()> {
+        let board_items = self.get_board_items(board_name).await?;
+        let (filtered, orphan_count) = partition_items_by_app_id(board_items, app_id);
+        if orphan_count == 0 {
+            return Ok(());
+        }
+
+        let board = self.get_board_by_name(board_name).await?;
+        let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
+        let payload = json!({
+            "json": {
+                "id": board.id,
+                "sections": board.sections,
+                "items": filtered,
+                "integrations": []
+            }
+        });
+
+        let response = self.post_json(&url, &payload).await?;
+        if !response.status().is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "Failed to save board '{}' while sweeping app '{}': {}",
+                board_name, app_id, text
+            )));
+        }
+
+        tracing::info!(
+            "Removed {} orphan board item(s) on '{}' for app_id={}",
+            orphan_count,
+            board_name,
+            app_id
+        );
         Ok(())
     }
 
@@ -1081,7 +1234,12 @@ impl HomarrClient {
         let response = self.get(&url).await?;
 
         if !response.status().is_success() {
-            return Ok(vec![]);
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "board.getBoardByName('{}') returned {}: {}",
+                board_name, status, text
+            )));
         }
 
         // Parse the full board response to get items
@@ -1163,6 +1321,135 @@ mod tests {
     fn test_client_new_preserves_path() {
         let client = HomarrClient::new("http://localhost:7575/homarr").unwrap();
         assert_eq!(client.base_url, "http://localhost:7575/homarr");
+    }
+
+    // find_app_by_url tests
+
+    fn selectable(id: &str, name: &str, href: Option<&str>) -> SelectableApp {
+        SelectableApp {
+            id: id.to_string(),
+            name: name.to_string(),
+            icon_url: "/icons/docker.svg".to_string(),
+            href: href.map(|h| h.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_find_app_by_url_normalized_match() {
+        let apps = vec![selectable(
+            "app-1",
+            "Cockpit",
+            Some("https://host.local/cockpit"),
+        )];
+        let found = HomarrClient::find_app_by_url(&apps, "https://host.local/cockpit/");
+        assert_eq!(found.map(|a| a.id.as_str()), Some("app-1"));
+    }
+
+    #[test]
+    fn test_find_app_by_url_sk_identity_absolute_to_path_only() {
+        // Existing app row stored under absolute URL; sync arrives with
+        // path-only URL. SK-identity fallback must match.
+        let apps = vec![selectable(
+            "sk-1",
+            "Freeboard-SK",
+            Some("https://host.local/signalk-server/@signalk/freeboard-sk/"),
+        )];
+        let found = HomarrClient::find_app_by_url(&apps, "/signalk-server/@signalk/freeboard-sk/");
+        assert_eq!(found.map(|a| a.id.as_str()), Some("sk-1"));
+    }
+
+    #[test]
+    fn test_find_app_by_url_sk_identity_path_only_to_absolute() {
+        // Reverse direction also works.
+        let apps = vec![selectable(
+            "sk-1",
+            "Freeboard-SK",
+            Some("/signalk-server/@signalk/freeboard-sk/"),
+        )];
+        let found = HomarrClient::find_app_by_url(
+            &apps,
+            "https://host.local/signalk-server/@signalk/freeboard-sk/",
+        );
+        assert_eq!(found.map(|a| a.id.as_str()), Some("sk-1"));
+    }
+
+    #[test]
+    fn test_find_app_by_url_sk_identity_does_not_match_different_webapp() {
+        let apps = vec![selectable(
+            "sk-1",
+            "Freeboard-SK",
+            Some("https://host.local/signalk-server/@signalk/freeboard-sk/"),
+        )];
+        let found = HomarrClient::find_app_by_url(&apps, "/signalk-server/@mxtommy/kip/");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_app_by_url_no_match_for_non_sk_url_format_transition() {
+        // Non-SK paths don't get the SK-identity fallback.
+        let apps = vec![selectable("a-1", "Cockpit", Some("/cockpit/"))];
+        let found = HomarrClient::find_app_by_url(&apps, "https://host.local/cockpit/");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_app_by_url_sk_fallback_skips_query_string_variant() {
+        // A human-customized SK href with `?embed=1` shares the same SK
+        // identity as the bare path-only form, but the SK fallback must
+        // refuse to claim it (it isn't an adapter-emitted href).
+        let apps = vec![selectable(
+            "human-1",
+            "Freeboard-SK (embed)",
+            Some("/signalk-server/@signalk/freeboard-sk/?embed=1"),
+        )];
+        let found = HomarrClient::find_app_by_url(&apps, "/signalk-server/@signalk/freeboard-sk/");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_app_by_url_sk_fallback_skips_fragment_variant() {
+        let apps = vec![selectable(
+            "human-1",
+            "Freeboard-SK (panel)",
+            Some("/signalk-server/@signalk/freeboard-sk/#panel"),
+        )];
+        let found = HomarrClient::find_app_by_url(&apps, "/signalk-server/@signalk/freeboard-sk/");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_find_app_by_url_empty_url_returns_none() {
+        let apps = vec![selectable(
+            "sk-1",
+            "Freeboard-SK",
+            Some("/signalk-server/@signalk/freeboard-sk/"),
+        )];
+        assert!(HomarrClient::find_app_by_url(&apps, "").is_none());
+    }
+
+    #[test]
+    fn test_find_app_by_url_candidate_with_no_href_is_skipped() {
+        // A candidate with href: None must not crash either tier.
+        let apps = vec![
+            selectable("hrefless", "Mystery", None),
+            selectable(
+                "sk-1",
+                "Freeboard-SK",
+                Some("/signalk-server/@signalk/freeboard-sk/"),
+            ),
+        ];
+        let found = HomarrClient::find_app_by_url(
+            &apps,
+            "https://host.local/signalk-server/@signalk/freeboard-sk/",
+        );
+        assert_eq!(found.map(|a| a.id.as_str()), Some("sk-1"));
+    }
+
+    #[test]
+    fn test_find_app_by_url_no_candidates_returns_none() {
+        let apps: Vec<SelectableApp> = vec![];
+        let found = HomarrClient::find_app_by_url(&apps, "/signalk-server/@signalk/freeboard-sk/");
+        assert!(found.is_none());
     }
 
     // find_next_position tests
@@ -1437,6 +1724,66 @@ mod tests {
 
         // Should not crash and should return false for all
         assert!(!board_has_app(&items, "any-app-id"));
+    }
+
+    // Tests for partition_items_by_app_id (cascade-delete helper)
+
+    fn item_for_app(item_id: &str, app_id: &str) -> serde_json::Value {
+        json!({
+            "id": item_id,
+            "kind": "app",
+            "options": {"appId": app_id}
+        })
+    }
+
+    #[test]
+    fn test_partition_items_keeps_unrelated() {
+        let items = vec![item_for_app("a", "keep-1"), item_for_app("b", "keep-2")];
+        let (kept, removed) = partition_items_by_app_id(items, "target");
+        assert_eq!(removed, 0);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn test_partition_items_removes_matching_app() {
+        let items = vec![item_for_app("a", "target"), item_for_app("b", "keep")];
+        let (kept, removed) = partition_items_by_app_id(items, "target");
+        assert_eq!(removed, 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(item_app_id(&kept[0]), Some("keep"));
+    }
+
+    #[test]
+    fn test_partition_items_removes_multiple_for_same_app() {
+        // Defensive: should not happen in practice, but if multiple items
+        // point at the same app_id, all are filtered out.
+        let items = vec![
+            item_for_app("a", "target"),
+            item_for_app("b", "target"),
+            item_for_app("c", "keep"),
+        ];
+        let (kept, removed) = partition_items_by_app_id(items, "target");
+        assert_eq!(removed, 2);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn test_partition_items_handles_malformed_items() {
+        let items = vec![
+            json!({"id": "no-options"}),
+            json!({"id": "empty-options", "options": {}}),
+            item_for_app("real", "target"),
+        ];
+        let (kept, removed) = partition_items_by_app_id(items, "target");
+        assert_eq!(removed, 1);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn test_partition_items_empty_input() {
+        let (kept, removed) = partition_items_by_app_id(vec![], "target");
+        assert_eq!(removed, 0);
+        assert!(kept.is_empty());
     }
 
     // Tests for derive_ping_url (auto-derive host.docker.internal URL for health checks)
