@@ -43,6 +43,7 @@ Rust service that bridges app definitions with the Homarr dashboard. Two main fu
 - `src/config.rs` - Adapter configuration
 - `docs/SPEC.md` - Functional requirements
 - `docs/ARCHITECTURE.md` - System design
+- `docs/solutions/` - Documented solutions to past problems (bugs, best practices, workflow patterns), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`); relevant when implementing or debugging in documented areas
 
 ## Technical Notes
 
