@@ -94,7 +94,7 @@ fn strip_dot_slash(path: &str) -> &str {
 fn build_icon_url(package_name: &str, app_icon: Option<&str>) -> String {
     match app_icon {
         Some(icon) if !icon.is_empty() => {
-            let icon = strip_dot_slash(icon);
+            let icon = strip_dot_slash(icon).trim_start_matches('/');
             format!(
                 "{}/{}/{}",
                 SIGNALK_PATH_PREFIX,
@@ -252,6 +252,15 @@ mod tests {
 
         assert_eq!(build_icon_url("some-app", None), DEFAULT_ICON);
         assert_eq!(build_icon_url("some-app", Some("")), DEFAULT_ICON);
+
+        // Leading-slash trim mirrors `build_webapp_url`: a SK manifest that
+        // happens to start its appIcon with `/` must not produce `//` in the
+        // emitted URL, which would survive past Traefik path matching as a
+        // distinct path.
+        assert_eq!(
+            build_icon_url("some-app", Some("/assets/icon.png")),
+            "/signalk-server/some-app/assets/icon.png"
+        );
     }
 
     #[test]

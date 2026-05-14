@@ -287,11 +287,15 @@ fn transform_icon_url(icon_path: &str) -> String {
     }
 
     // Any other absolute path is treated as a URL path and passed through.
-    if icon_path.starts_with('/') {
+    // Reject protocol-relative URLs (`//host/path`) explicitly: they survive
+    // `starts_with('/')` but render as cross-origin `<img>` fetches in the
+    // browser, which would leak request metadata to an attacker-controlled
+    // host if a webapps.d TOML icon entry was ever crafted to exploit this.
+    if icon_path.starts_with('/') && !icon_path.starts_with("//") {
         return icon_path.to_string();
     }
 
-    // Bare filenames and other non-path inputs - use fallback
+    // Bare filenames, protocol-relative URLs, and other non-path inputs - use fallback
     DEFAULT_ICON.to_string()
 }
 
@@ -1658,12 +1662,16 @@ mod tests {
     #[test]
     fn test_transform_icon_url_absolute_path_passthrough() {
         // Any absolute path (not pixmaps) is treated as a URL path and
-        // passed through verbatim. This covers path-only URLs emitted by
-        // Signal K discovery (`/signalk-server/...`) and any registry
-        // TOML entry that ships an absolute URL path.
+        // passed through verbatim. Covers path-only URLs emitted by
+        // Signal K discovery (`/signalk-server/...`), registry TOML
+        // entries shipping `/icons/...`, and any other absolute URL path.
         assert_eq!(
             transform_icon_url("/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png"),
             "/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png"
+        );
+        assert_eq!(
+            transform_icon_url("/icons/existing.svg"),
+            "/icons/existing.svg"
         );
         assert_eq!(
             transform_icon_url("/some/other/path/icon.png"),
@@ -1679,10 +1687,14 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_icon_url_icons_path_passthrough() {
-        // Already relative /icons/ paths should pass through unchanged
-        let result = transform_icon_url("/icons/existing.svg");
-        assert_eq!(result, "/icons/existing.svg");
+    fn test_transform_icon_url_rejects_protocol_relative() {
+        // `//host/path` would render as a cross-origin <img> fetch; reject to
+        // the default icon instead of leaking request metadata.
+        assert_eq!(
+            transform_icon_url("//evil.example.com/icon.png"),
+            "/icons/docker.svg"
+        );
+        assert_eq!(transform_icon_url("//host/foo"), "/icons/docker.svg");
     }
 
     #[test]
