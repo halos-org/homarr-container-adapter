@@ -79,15 +79,6 @@ struct SkAppListEntry {
     location: String,
 }
 
-/// Get the mDNS domain (hostname.local)
-fn get_domain() -> String {
-    let hostname = gethostname::gethostname()
-        .into_string()
-        .unwrap_or_else(|_| "localhost".to_string());
-    let short = hostname.split('.').next().unwrap_or("localhost");
-    format!("{}.local", short)
-}
-
 /// Strip leading `./` from a relative path
 fn strip_dot_slash(path: &str) -> &str {
     path.strip_prefix("./").unwrap_or(path)
@@ -95,16 +86,17 @@ fn strip_dot_slash(path: &str) -> &str {
 
 /// Build the icon URL accessible from the user's browser via Traefik.
 ///
-/// The appIcon is relative to the webapp's mount point, so we construct:
-/// `https://<domain>/signalk-server/<package-name>/<appIcon>`
+/// Path-only so the browser resolves it against whichever hostname the user
+/// is currently using (mDNS, VPN FQDN, DHCP-DNS), matching the multi-hostname
+/// access model used by `build_webapp_url`.
+///
+/// Example: `/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png`
 fn build_icon_url(package_name: &str, app_icon: Option<&str>) -> String {
     match app_icon {
         Some(icon) if !icon.is_empty() => {
-            let domain = get_domain();
             let icon = strip_dot_slash(icon);
             format!(
-                "https://{}{}/{}/{}",
-                domain,
+                "{}/{}/{}",
                 SIGNALK_PATH_PREFIX,
                 package_name.trim_matches('/'),
                 icon
@@ -245,15 +237,18 @@ mod tests {
 
     #[test]
     fn test_build_icon_url() {
-        let url = build_icon_url(
-            "@signalk/freeboard-sk",
-            Some("./assets/icons/icon-72x72.png"),
+        assert_eq!(
+            build_icon_url(
+                "@signalk/freeboard-sk",
+                Some("./assets/icons/icon-72x72.png"),
+            ),
+            "/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png"
         );
-        assert!(url.starts_with("https://"));
-        assert!(url.contains("/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png"));
 
-        let url = build_icon_url("@mxtommy/kip", Some("assets/icon-72x72.png"));
-        assert!(url.contains("/signalk-server/@mxtommy/kip/assets/icon-72x72.png"));
+        assert_eq!(
+            build_icon_url("@mxtommy/kip", Some("assets/icon-72x72.png")),
+            "/signalk-server/@mxtommy/kip/assets/icon-72x72.png"
+        );
 
         assert_eq!(build_icon_url("some-app", None), DEFAULT_ICON);
         assert_eq!(build_icon_url("some-app", Some("")), DEFAULT_ICON);
@@ -440,9 +435,10 @@ mod tests {
         // Freeboard-SK uses displayName
         assert_eq!(apps[0].name, "Freeboard-SK");
         assert_eq!(apps[0].url, "/signalk-server/@signalk/freeboard-sk/");
-        let icon = apps[0].icon_url.as_ref().unwrap();
-        assert!(icon.contains("/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png"));
-        assert!(icon.starts_with("https://"));
+        assert_eq!(
+            apps[0].icon_url.as_deref(),
+            Some("/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png")
+        );
         assert_eq!(apps[0].description, Some("Chart plotter".to_string()));
 
         // Webapp without signalk field falls back to package name and default icon
