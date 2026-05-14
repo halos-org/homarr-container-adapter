@@ -259,12 +259,13 @@ fn partition_items_by_app_id(
 
 /// Transform icon paths to relative URLs for Homarr.
 ///
-/// Icons are served by Homarr's nginx from /icons/ which maps to /usr/share/pixmaps.
 /// This function transforms:
-/// - `/usr/share/pixmaps/app.png` → `/icons/app.png`
+/// - `/usr/share/pixmaps/app.png` → `/icons/app.png` (legacy Docker pixmaps mapping)
 /// - HTTP/HTTPS URLs → unchanged
-/// - `/icons/*` paths → unchanged
-/// - Everything else → `/icons/docker.svg` (fallback)
+/// - Any other absolute path (`/icons/*`, `/signalk-server/*`, …) → unchanged.
+///   Path-only URLs resolve against the current origin in the browser, so we
+///   pass them through verbatim and let Traefik route them.
+/// - Bare filenames and everything else → `/icons/docker.svg` (fallback)
 fn transform_icon_url(icon_path: &str) -> String {
     const PIXMAPS_PREFIX: &str = "/usr/share/pixmaps/";
 
@@ -277,11 +278,6 @@ fn transform_icon_url(icon_path: &str) -> String {
         return icon_path.to_string();
     }
 
-    // Already relative /icons/ paths - pass through unchanged
-    if icon_path.starts_with("/icons/") {
-        return icon_path.to_string();
-    }
-
     // Transform /usr/share/pixmaps/ paths to /icons/
     if let Some(filename) = icon_path.strip_prefix(PIXMAPS_PREFIX) {
         if filename.is_empty() {
@@ -290,7 +286,16 @@ fn transform_icon_url(icon_path: &str) -> String {
         return format!("/icons/{}", filename);
     }
 
-    // Unknown format - use fallback
+    // Any other absolute path is treated as a URL path and passed through.
+    // Reject protocol-relative URLs (`//host/path`) explicitly: they survive
+    // `starts_with('/')` but render as cross-origin `<img>` fetches in the
+    // browser, which would leak request metadata to an attacker-controlled
+    // host if a webapps.d TOML icon entry was ever crafted to exploit this.
+    if icon_path.starts_with('/') && !icon_path.starts_with("//") {
+        return icon_path.to_string();
+    }
+
+    // Bare filenames, protocol-relative URLs, and other non-path inputs - use fallback
     DEFAULT_ICON.to_string()
 }
 
@@ -1655,10 +1660,23 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_icon_url_unrecognized_path() {
-        // Unrecognized file paths should return default icon path
-        let result = transform_icon_url("/some/other/path/icon.png");
-        assert_eq!(result, "/icons/docker.svg");
+    fn test_transform_icon_url_absolute_path_passthrough() {
+        // Any absolute path (not pixmaps) is treated as a URL path and
+        // passed through verbatim. Covers path-only URLs emitted by
+        // Signal K discovery (`/signalk-server/...`), registry TOML
+        // entries shipping `/icons/...`, and any other absolute URL path.
+        assert_eq!(
+            transform_icon_url("/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png"),
+            "/signalk-server/@signalk/freeboard-sk/assets/icons/icon-72x72.png"
+        );
+        assert_eq!(
+            transform_icon_url("/icons/existing.svg"),
+            "/icons/existing.svg"
+        );
+        assert_eq!(
+            transform_icon_url("/some/other/path/icon.png"),
+            "/some/other/path/icon.png"
+        );
     }
 
     #[test]
@@ -1669,10 +1687,14 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_icon_url_icons_path_passthrough() {
-        // Already relative /icons/ paths should pass through unchanged
-        let result = transform_icon_url("/icons/existing.svg");
-        assert_eq!(result, "/icons/existing.svg");
+    fn test_transform_icon_url_rejects_protocol_relative() {
+        // `//host/path` would render as a cross-origin <img> fetch; reject to
+        // the default icon instead of leaking request metadata.
+        assert_eq!(
+            transform_icon_url("//evil.example.com/icon.png"),
+            "/icons/docker.svg"
+        );
+        assert_eq!(transform_icon_url("//host/foo"), "/icons/docker.svg");
     }
 
     #[test]
