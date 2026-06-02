@@ -3,6 +3,7 @@
 use reqwest::{cookie::Jar, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::branding::BrandingConfig;
@@ -1235,40 +1236,7 @@ impl HomarrClient {
 
         // Get layout preferences from registry
         let layout = app.effective_layout();
-        let width = layout.width as i32;
-        let height = layout.height as i32;
-        let explicit_offset = match (layout.x_offset, layout.y_offset) {
-            (Some(x), Some(y)) => Some((x as i32, y as i32)),
-            _ => None,
-        };
-
-        // Position the card independently on every responsive layout: each grid
-        // has a different column count, so an item needs its own placement per
-        // layout, and a layout with no entry would drop the card on that
-        // breakpoint. Width is clamped to the column count to match Homarr's own
-        // reflow behaviour on narrow grids.
-        let item_layouts: Vec<serde_json::Value> = board
-            .layouts
-            .iter()
-            .map(|board_layout| {
-                let (x_offset, y_offset) = match explicit_offset {
-                    Some(offset) => offset,
-                    None => self.find_next_position(
-                        &board_items,
-                        &board_layout.id,
-                        board_layout.column_count,
-                    ),
-                };
-                json!({
-                    "layoutId": board_layout.id,
-                    "sectionId": section_id,
-                    "width": width.min(board_layout.column_count),
-                    "height": height,
-                    "xOffset": x_offset,
-                    "yOffset": y_offset
-                })
-            })
-            .collect();
+        let item_layouts = build_item_layouts(&board.layouts, &board_items, &section_id, layout);
 
         // Generate a unique ID for this board item
         // Use container name if available, otherwise use a hash of the URL
@@ -1309,8 +1277,8 @@ impl HomarrClient {
             "Added registry app '{}' to board across {} layout(s) size {}x{}",
             app.name,
             item_layouts.len(),
-            width,
-            height
+            layout.width,
+            layout.height
         );
 
         Ok(())
@@ -1348,64 +1316,153 @@ impl HomarrClient {
 
         Ok(items)
     }
+}
 
-    /// Find next available position for a single layout (simple
-    /// left-to-right, top-to-bottom). Only the target layout's entries are
-    /// considered, so positions from other column grids do not blend in.
-    fn find_next_position(
-        &self,
-        items: &[serde_json::Value],
-        layout_id: &str,
-        column_count: i32,
-    ) -> (i32, i32) {
-        let mut max_y = 0;
-        let mut positions_in_max_row: Vec<i32> = vec![];
+/// Project a registry offset into a legal anchor cell for one layout.
+///
+/// `x` scales with the column count (offsets are authored against the widest
+/// layout, so a right-side card stays on the right as the grid narrows); `y` is
+/// unscaled since rows are unbounded. The result is clamped so the card's
+/// footprint fits. A missing offset anchors to the origin.
+fn project_anchor(
+    x_offset: Option<u8>,
+    y_offset: Option<u8>,
+    column_count: i32,
+    widest_columns: i32,
+    clamped_width: i32,
+) -> (i32, i32) {
+    let raw_x = x_offset.unwrap_or(0) as i32;
+    let raw_y = y_offset.unwrap_or(0) as i32;
 
-        for item in items {
-            if let Some(layouts) = item.get("layouts").and_then(|l| l.as_array()) {
-                for layout in layouts {
-                    if layout.get("layoutId").and_then(|id| id.as_str()) != Some(layout_id) {
-                        continue;
-                    }
-                    let x = layout.get("xOffset").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
-                    let y = layout.get("yOffset").and_then(|y| y.as_i64()).unwrap_or(0) as i32;
-                    let h = layout.get("height").and_then(|h| h.as_i64()).unwrap_or(1) as i32;
+    let widest = widest_columns.max(1);
+    let scaled_x = (raw_x * column_count + widest / 2) / widest;
 
-                    let item_bottom = y + h;
-                    if item_bottom > max_y {
-                        max_y = item_bottom;
-                        positions_in_max_row.clear();
-                    }
-                    if y + h == max_y {
-                        let w = layout.get("width").and_then(|w| w.as_i64()).unwrap_or(1) as i32;
-                        for col in x..(x + w) {
-                            positions_in_max_row.push(col);
-                        }
-                    }
+    let max_x = (column_count - clamped_width).max(0);
+    (scaled_x.clamp(0, max_x), raw_y.max(0))
+}
+
+/// Find the free cell nearest the anchor for a single layout.
+///
+/// Only the target layout's item entries count toward occupancy, so positions
+/// from other column grids do not blend in. Among cells where the card's
+/// `width × height` footprint fits without overlap, the one closest (squared
+/// Euclidean) to `anchor` wins; iterating rows-then-columns ascending and
+/// keeping only strict improvements yields the lower-row-then-lower-column
+/// tie-break. The deepest occupied row is always free, so a spot always exists.
+fn find_card_position(
+    items: &[serde_json::Value],
+    layout_id: &str,
+    column_count: i32,
+    width: i32,
+    height: i32,
+    anchor: (i32, i32),
+) -> (i32, i32) {
+    let mut occupied: HashSet<(i32, i32)> = HashSet::new();
+    let mut max_bottom = 0;
+
+    for item in items {
+        let Some(layouts) = item.get("layouts").and_then(|l| l.as_array()) else {
+            continue;
+        };
+        for layout in layouts {
+            if layout.get("layoutId").and_then(|id| id.as_str()) != Some(layout_id) {
+                continue;
+            }
+            let x = layout.get("xOffset").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let y = layout.get("yOffset").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let w = layout.get("width").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+            let h = layout.get("height").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+            for cx in x..(x + w) {
+                for cy in y..(y + h) {
+                    occupied.insert((cx, cy));
                 }
             }
+            max_bottom = max_bottom.max(y + h);
         }
-
-        // Find first empty column in the last row, or start new row
-        for x in 0..column_count {
-            if !positions_in_max_row.contains(&x) {
-                return (x, max_y.saturating_sub(1).max(0));
-            }
-        }
-
-        // All columns full, start new row
-        (0, max_y)
     }
+
+    let fits = |px: i32, py: i32| {
+        (px..px + width).all(|cx| (py..py + height).all(|cy| !occupied.contains(&(cx, cy))))
+    };
+
+    let (ax, ay) = anchor;
+    let last_col = (column_count - width).max(0);
+    // Search at least down to the anchor row so a card whose preferred row sits
+    // below the occupied region can still land there; the deepest searched row
+    // is always free, so a spot always exists.
+    let last_row = max_bottom.max(ay.max(0));
+    (0..=last_row)
+        .flat_map(|py| (0..=last_col).map(move |px| (px, py)))
+        .filter(|&(px, py)| fits(px, py))
+        // Sort key encodes the rule directly: nearest by squared distance, then
+        // lower row, then lower column — so the tie-break is explicit, not an
+        // artifact of iteration order.
+        .min_by_key(|&(px, py)| {
+            let (dx, dy) = ((px - ax) as i64, (py - ay) as i64);
+            (dx * dx + dy * dy, py, px)
+        })
+        .unwrap_or((0, 0))
+}
+
+/// Build the per-layout position entries for one card's `saveBoard` item.
+///
+/// Each responsive layout gets its own entry: the card's width is clamped to
+/// that layout's column count, the registry offset (or the origin) is projected
+/// into a legal anchor for that grid, and the card is placed at the free cell
+/// nearest the anchor. A layout with no entry would drop the card on that
+/// breakpoint, so every board layout produces exactly one entry.
+fn build_item_layouts(
+    board_layouts: &[Layout],
+    board_items: &[serde_json::Value],
+    section_id: &str,
+    layout: &crate::registry::LayoutConfig,
+) -> Vec<serde_json::Value> {
+    let width = layout.width as i32;
+    let height = layout.height as i32;
+
+    // Offsets are authored against the widest (desktop) layout; narrower layouts
+    // scale the preferred column down proportionally.
+    let widest_columns = board_layouts
+        .iter()
+        .map(|l| l.column_count)
+        .max()
+        .unwrap_or(width);
+
+    board_layouts
+        .iter()
+        .map(|board_layout| {
+            let clamped_width = width.min(board_layout.column_count);
+            let anchor = project_anchor(
+                layout.x_offset,
+                layout.y_offset,
+                board_layout.column_count,
+                widest_columns,
+                clamped_width,
+            );
+            let (x_offset, y_offset) = find_card_position(
+                board_items,
+                &board_layout.id,
+                board_layout.column_count,
+                clamped_width,
+                height,
+                anchor,
+            );
+            json!({
+                "layoutId": board_layout.id,
+                "sectionId": section_id,
+                "width": clamped_width,
+                "height": height,
+                "xOffset": x_offset,
+                "yOffset": y_offset
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn create_test_client() -> HomarrClient {
-        HomarrClient::new("http://localhost:7575").unwrap()
-    }
 
     // HomarrClient creation tests
     #[test]
@@ -1555,7 +1612,7 @@ mod tests {
         assert!(found.is_none());
     }
 
-    // find_next_position tests
+    // find_card_position / project_anchor tests
 
     const LID: &str = "layout-a";
 
@@ -1572,124 +1629,230 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_find_next_position_empty_board() {
-        let client = create_test_client();
-        let items: Vec<serde_json::Value> = vec![];
-        let (x, y) = client.find_next_position(&items, LID, 10);
-        assert_eq!((x, y), (0, 0));
+    /// Place a 1x1 card anchored at the origin (the no-offset gap-fill case).
+    fn gap_fill(items: &[serde_json::Value], columns: i32) -> (i32, i32) {
+        find_card_position(items, LID, columns, 1, 1, (0, 0))
     }
 
     #[test]
-    fn test_find_next_position_single_item() {
-        let client = create_test_client();
+    fn placement_empty_board_lands_at_origin() {
+        assert_eq!(gap_fill(&[], 10), (0, 0));
+    }
+
+    #[test]
+    fn placement_fills_beside_single_item() {
         let items = vec![item_at(0, 0, 1, 1)];
-        let (x, y) = client.find_next_position(&items, LID, 10);
-        // Should place next to the existing item
-        assert_eq!((x, y), (1, 0));
+        // (1,0) and (0,1) are equidistant; lower row wins.
+        assert_eq!(gap_fill(&items, 10), (1, 0));
     }
 
     #[test]
-    fn test_find_next_position_full_row() {
-        let client = create_test_client();
-        // Fill all 10 columns in row 0
+    fn placement_starts_new_row_when_full() {
         let items: Vec<serde_json::Value> = (0..10).map(|i| item_at(i, 0, 1, 1)).collect();
-        let (x, y) = client.find_next_position(&items, LID, 10);
-        // Should start a new row
-        assert_eq!((x, y), (0, 1));
+        assert_eq!(gap_fill(&items, 10), (0, 1));
     }
 
     #[test]
-    fn test_find_next_position_with_gap() {
-        let client = create_test_client();
-        // Items at positions 0 and 2, leaving gap at 1
+    fn placement_fills_interior_gap() {
         let items = vec![item_at(0, 0, 1, 1), item_at(2, 0, 1, 1)];
-        let (x, y) = client.find_next_position(&items, LID, 10);
-        // Should fill the gap at position 1
-        assert_eq!((x, y), (1, 0));
+        assert_eq!(gap_fill(&items, 10), (1, 0));
     }
 
     #[test]
-    fn test_find_next_position_wide_item() {
-        let client = create_test_client();
-        // Wide item taking columns 0-2
+    fn placement_packs_toward_origin_past_wide_tile() {
+        // Past a 3-wide tile, the next-row origin cell (0,1) is nearer than the
+        // first free column (3,0) — the gap-fill the old greedy fill missed.
         let items = vec![item_at(0, 0, 3, 1)];
-        let (x, y) = client.find_next_position(&items, LID, 10);
-        // Should place at column 3
-        assert_eq!((x, y), (3, 0));
+        assert_eq!(gap_fill(&items, 10), (0, 1));
     }
 
     #[test]
-    fn test_find_next_position_tall_item() {
-        let client = create_test_client();
-        // Tall item at position 0
+    fn placement_packs_beside_tall_tile() {
+        // A 1x3 tile in column 0 leaves (1,0) free and nearest to the origin.
         let items = vec![item_at(0, 0, 1, 3)];
-        let (x, y) = client.find_next_position(&items, LID, 10);
-        // Should place in the same row but different column
-        assert_eq!((x, y), (1, 2));
+        assert_eq!(gap_fill(&items, 10), (1, 0));
     }
 
     #[test]
-    fn test_find_next_position_multiple_rows() {
-        let client = create_test_client();
-        // Items in multiple rows
+    fn placement_prefers_nearer_origin_over_row_gap() {
+        // Row 0 full, row 1 holds cols 0-4. The empty (0,2) is nearer the origin
+        // than the row-1 gap at (5,1), so it wins.
         let items = vec![item_at(0, 0, 10, 1), item_at(0, 1, 5, 1)];
-        let (x, y) = client.find_next_position(&items, LID, 10);
-        // Should place after the item in row 1
-        assert_eq!((x, y), (5, 1));
+        assert_eq!(gap_fill(&items, 10), (0, 2));
     }
 
     #[test]
-    fn test_find_next_position_small_column_count() {
-        let client = create_test_client();
-        // Fill a 3-column board
-        let items: Vec<serde_json::Value> = (0..3).map(|i| item_at(i, 0, 1, 1)).collect();
-        let (x, y) = client.find_next_position(&items, LID, 3);
-        // Should start a new row
-        assert_eq!((x, y), (0, 1));
-    }
-
-    #[test]
-    fn test_find_next_position_items_without_layouts() {
-        let client = create_test_client();
-        // Items missing layouts field
+    fn placement_handles_items_without_layouts() {
         let items = vec![json!({"id": "item1"}), json!({"layouts": []})];
-        let (x, y) = client.find_next_position(&items, LID, 10);
-        // Should handle gracefully and start at origin
-        assert_eq!((x, y), (0, 0));
+        assert_eq!(gap_fill(&items, 10), (0, 0));
     }
 
     #[test]
-    fn test_find_next_position_ignores_other_layouts() {
-        let client = create_test_client();
-        // An item occupying column 0 on a different layout must not influence
-        // placement on the target layout, which should stay empty at origin.
+    fn placement_ignores_other_layouts() {
+        // Occupancy on a different layout must not influence this one.
         let items = vec![json!({
             "layouts": [{
                 "layoutId": "other-layout",
-                "xOffset": 0,
-                "yOffset": 0,
-                "width": 4,
-                "height": 1
+                "xOffset": 0, "yOffset": 0, "width": 4, "height": 1
             }]
         })];
-        let (x, y) = client.find_next_position(&items, LID, 10);
-        assert_eq!((x, y), (0, 0));
+        assert_eq!(gap_fill(&items, 10), (0, 0));
     }
 
     #[test]
-    fn test_find_next_position_scopes_to_target_layout() {
-        let client = create_test_client();
-        // One item carries entries for two layouts at different positions. Each
-        // layout must be packed independently.
+    fn placement_scopes_occupancy_per_layout() {
+        // One item occupies different cells on two layouts; each placement sees
+        // only its own layout's occupancy and so lands differently.
         let items = vec![json!({
             "layouts": [
-                {"layoutId": LID, "xOffset": 0, "yOffset": 0, "width": 2, "height": 1},
-                {"layoutId": "wide", "xOffset": 0, "yOffset": 0, "width": 6, "height": 1}
+                {"layoutId": LID, "xOffset": 0, "yOffset": 0, "width": 1, "height": 1},
+                {"layoutId": "wide", "xOffset": 5, "yOffset": 0, "width": 1, "height": 1}
             ]
         })];
-        assert_eq!(client.find_next_position(&items, LID, 4), (2, 0));
-        assert_eq!(client.find_next_position(&items, "wide", 12), (6, 0));
+        assert_eq!(find_card_position(&items, LID, 12, 1, 1, (0, 0)), (1, 0));
+        assert_eq!(find_card_position(&items, "wide", 12, 1, 1, (0, 0)), (0, 0));
+    }
+
+    #[test]
+    fn placement_lands_on_exact_anchor_when_free() {
+        assert_eq!(find_card_position(&[], LID, 10, 1, 1, (3, 0)), (3, 0));
+    }
+
+    #[test]
+    fn placement_falls_back_to_nearest_free_when_anchor_taken() {
+        // Anchor (3,0) occupied; neighbours (2,0)/(4,0)/(3,1) are equidistant —
+        // lower row then lower column picks (2,0).
+        let items = vec![item_at(3, 0, 1, 1)];
+        assert_eq!(find_card_position(&items, LID, 10, 1, 1, (3, 0)), (2, 0));
+    }
+
+    #[test]
+    fn placement_keeps_footprint_within_columns() {
+        // A 2-wide card anchored hard right cannot start at column 9 (10 cols);
+        // the nearest legal start is column 8.
+        assert_eq!(find_card_position(&[], LID, 10, 2, 1, (9, 0)), (8, 0));
+    }
+
+    #[test]
+    fn placement_tie_break_prefers_lower_row_then_lower_column() {
+        let items = vec![item_at(1, 0, 1, 1)];
+        // (0,0)/(2,0)/(1,1) equidistant from (1,0); lower row then lower col.
+        assert_eq!(find_card_position(&items, LID, 10, 1, 1, (1, 0)), (0, 0));
+    }
+
+    #[test]
+    fn project_anchor_defaults_to_origin() {
+        assert_eq!(project_anchor(None, None, 4, 12, 1), (0, 0));
+    }
+
+    #[test]
+    fn project_anchor_widest_layout_keeps_offset() {
+        // On the widest layout the scale factor is 1, so the offset is exact.
+        assert_eq!(project_anchor(Some(8), Some(2), 12, 12, 1), (8, 2));
+    }
+
+    #[test]
+    fn project_anchor_scales_x_down_for_narrow_layout() {
+        // x: 8 * 4 / 12 = 2.67 -> 3; y is unscaled.
+        assert_eq!(project_anchor(Some(8), Some(2), 4, 12, 1), (3, 2));
+    }
+
+    #[test]
+    fn project_anchor_rounds_to_nearest_column() {
+        // x: 2 * 3 / 12 = 0.5 -> 1.
+        assert_eq!(project_anchor(Some(2), None, 3, 12, 1), (1, 0));
+    }
+
+    #[test]
+    fn project_anchor_clamps_to_footprint() {
+        // x scales to 4 but a 2-wide card in 4 columns can start at most at 2.
+        assert_eq!(project_anchor(Some(11), None, 4, 12, 2), (2, 0));
+    }
+
+    #[test]
+    fn placement_routes_multicell_around_block() {
+        // A 2x2 card cannot overlap a 2x2 block at the origin. (2,0) and (0,2)
+        // are equidistant; lower row wins.
+        let items = vec![item_at(0, 0, 2, 2)];
+        assert_eq!(find_card_position(&items, LID, 10, 2, 2, (0, 0)), (2, 0));
+    }
+
+    #[test]
+    fn placement_tall_card_rejects_occupied_column() {
+        // A 1x3 card anchored at column 1 cannot start there because (1,1) is
+        // occupied, so its rows 0-2 don't all fit; it moves to the nearest clear
+        // column, (0,0).
+        let items = vec![item_at(1, 1, 1, 1)];
+        assert_eq!(find_card_position(&items, LID, 10, 1, 3, (1, 0)), (0, 0));
+    }
+
+    #[test]
+    fn placement_picks_nearer_column_by_distance() {
+        // Anchor (5,0) is occupied along with (4,0). The dist-1 cell (6,0) must
+        // win over closer-iterated but farther cells like (3,0) at dist 4.
+        let items = vec![item_at(4, 0, 2, 1)];
+        assert_eq!(find_card_position(&items, LID, 10, 1, 1, (5, 0)), (6, 0));
+    }
+
+    #[test]
+    fn placement_honors_nonzero_anchor_row() {
+        // An empty board still honors a preferred row below the (empty) occupied
+        // region instead of snapping the card to row 0.
+        assert_eq!(find_card_position(&[], LID, 10, 1, 1, (0, 3)), (0, 3));
+    }
+
+    // build_item_layouts tests
+
+    fn layout_config(
+        width: u8,
+        height: u8,
+        x: Option<u8>,
+        y: Option<u8>,
+    ) -> crate::registry::LayoutConfig {
+        crate::registry::LayoutConfig {
+            priority: 50,
+            width,
+            height,
+            x_offset: x,
+            y_offset: y,
+        }
+    }
+
+    #[test]
+    fn build_item_layouts_projects_and_places_per_layout() {
+        // Desktop (12 cols) and mobile (4 cols). A right-anchored 2-wide card
+        // (x_offset 11, authored against the widest layout) lands at the right
+        // edge on desktop and a proportionally scaled, clamped column on mobile.
+        let layouts = vec![
+            existing_layout("desktop", 1200, 12),
+            existing_layout("mobile", 0, 4),
+        ];
+        let cfg = layout_config(2, 1, Some(11), None);
+        let out = build_item_layouts(&layouts, &[], "sec", &cfg);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["layoutId"], "desktop");
+        assert_eq!(out[0]["width"], 2);
+        assert_eq!(out[0]["xOffset"], 10); // 12 - width 2
+        assert_eq!(out[1]["layoutId"], "mobile");
+        assert_eq!(out[1]["width"], 2); // clamped to 4-col grid (no change here)
+        assert_eq!(out[1]["xOffset"], 2); // 11*4/12 -> 4, clamped to 4-2
+    }
+
+    #[test]
+    fn build_item_layouts_clamps_width_to_narrow_layout() {
+        // A 6-wide card is clamped to the 4-column mobile grid.
+        let layouts = vec![existing_layout("mobile", 0, 4)];
+        let cfg = layout_config(6, 1, None, None);
+        let out = build_item_layouts(&layouts, &[], "sec", &cfg);
+        assert_eq!(out[0]["width"], 4);
+        assert_eq!(out[0]["xOffset"], 0);
+    }
+
+    #[test]
+    fn build_item_layouts_empty_layouts_yields_no_entries() {
+        let cfg = layout_config(1, 1, None, None);
+        assert!(build_item_layouts(&[], &[], "sec", &cfg).is_empty());
     }
 
     // build_layout_submission tests
