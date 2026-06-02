@@ -97,12 +97,14 @@ pub struct LayoutConfig {
     #[serde(default = "default_size")]
     pub height: u8,
 
-    /// Explicit column position (0-11 for 12-column grid)
-    /// If omitted, auto-positioned based on priority
+    /// Preferred column, authored against the widest (desktop) layout. A soft
+    /// anchor, not an exact pin: the card lands on the free cell nearest this
+    /// column, and the value is scaled down on narrower layouts. Omitted →
+    /// anchored at the origin.
     pub x_offset: Option<u8>,
 
-    /// Explicit row position
-    /// If omitted, auto-positioned based on priority
+    /// Preferred row. A soft anchor like `x_offset`, but unscaled (rows are
+    /// unbounded). Omitted → anchored at the origin.
     pub y_offset: Option<u8>,
 }
 
@@ -246,8 +248,15 @@ pub fn load_all_apps<P: AsRef<Path>>(registry_dir: P) -> Result<Vec<RegistryEntr
         }
     }
 
-    // Sort by priority (lower = first)
-    entries.sort_by_key(|e| e.app.layout.priority);
+    // Sort by priority (lower = first), then by source path so placement order
+    // is deterministic regardless of read_dir order (which is unspecified).
+    entries.sort_by(|a, b| {
+        a.app
+            .layout
+            .priority
+            .cmp(&b.app.layout.priority)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
 
     tracing::info!(
         "Loaded {} apps from registry directory {:?}",

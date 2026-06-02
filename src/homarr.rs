@@ -1236,55 +1236,7 @@ impl HomarrClient {
 
         // Get layout preferences from registry
         let layout = app.effective_layout();
-        let width = layout.width as i32;
-        let height = layout.height as i32;
-
-        // Offsets are authored against the widest (desktop) layout; narrower
-        // layouts scale the preferred column down proportionally.
-        let widest_columns = board
-            .layouts
-            .iter()
-            .map(|l| l.column_count)
-            .max()
-            .unwrap_or(width);
-
-        // Position the card independently on every responsive layout: each grid
-        // has a different column count, so an item needs its own placement per
-        // layout, and a layout with no entry would drop the card on that
-        // breakpoint. Width is clamped to the column count to match Homarr's own
-        // reflow behaviour on narrow grids. The registry offset (or the origin,
-        // when absent) is a preferred anchor: the card lands on the free cell
-        // nearest to it rather than overlapping or running off a narrow grid.
-        let item_layouts: Vec<serde_json::Value> = board
-            .layouts
-            .iter()
-            .map(|board_layout| {
-                let clamped_width = width.min(board_layout.column_count);
-                let anchor = project_anchor(
-                    layout.x_offset,
-                    layout.y_offset,
-                    board_layout.column_count,
-                    widest_columns,
-                    clamped_width,
-                );
-                let (x_offset, y_offset) = find_card_position(
-                    &board_items,
-                    &board_layout.id,
-                    board_layout.column_count,
-                    clamped_width,
-                    height,
-                    anchor,
-                );
-                json!({
-                    "layoutId": board_layout.id,
-                    "sectionId": section_id,
-                    "width": clamped_width,
-                    "height": height,
-                    "xOffset": x_offset,
-                    "yOffset": y_offset
-                })
-            })
-            .collect();
+        let item_layouts = build_item_layouts(&board.layouts, &board_items, &section_id, layout);
 
         // Generate a unique ID for this board item
         // Use container name if available, otherwise use a hash of the URL
@@ -1325,8 +1277,8 @@ impl HomarrClient {
             "Added registry app '{}' to board across {} layout(s) size {}x{}",
             app.name,
             item_layouts.len(),
-            width,
-            height
+            layout.width,
+            layout.height
         );
 
         Ok(())
@@ -1434,20 +1386,77 @@ fn find_card_position(
     };
 
     let (ax, ay) = anchor;
-    let mut best: Option<(i64, i32, i32)> = None;
-    for py in 0..=max_bottom {
-        for px in 0..=(column_count - width).max(0) {
-            if !fits(px, py) {
-                continue;
-            }
-            let dist = ((px - ax) as i64).pow(2) + ((py - ay) as i64).pow(2);
-            if best.is_none_or(|(d, _, _)| dist < d) {
-                best = Some((dist, px, py));
-            }
-        }
-    }
+    let last_col = (column_count - width).max(0);
+    // Search at least down to the anchor row so a card whose preferred row sits
+    // below the occupied region can still land there; the deepest searched row
+    // is always free, so a spot always exists.
+    let last_row = max_bottom.max(ay.max(0));
+    (0..=last_row)
+        .flat_map(|py| (0..=last_col).map(move |px| (px, py)))
+        .filter(|&(px, py)| fits(px, py))
+        // Sort key encodes the rule directly: nearest by squared distance, then
+        // lower row, then lower column — so the tie-break is explicit, not an
+        // artifact of iteration order.
+        .min_by_key(|&(px, py)| {
+            let (dx, dy) = ((px - ax) as i64, (py - ay) as i64);
+            (dx * dx + dy * dy, py, px)
+        })
+        .unwrap_or((0, 0))
+}
 
-    best.map(|(_, x, y)| (x, y)).unwrap_or((0, 0))
+/// Build the per-layout position entries for one card's `saveBoard` item.
+///
+/// Each responsive layout gets its own entry: the card's width is clamped to
+/// that layout's column count, the registry offset (or the origin) is projected
+/// into a legal anchor for that grid, and the card is placed at the free cell
+/// nearest the anchor. A layout with no entry would drop the card on that
+/// breakpoint, so every board layout produces exactly one entry.
+fn build_item_layouts(
+    board_layouts: &[Layout],
+    board_items: &[serde_json::Value],
+    section_id: &str,
+    layout: &crate::registry::LayoutConfig,
+) -> Vec<serde_json::Value> {
+    let width = layout.width as i32;
+    let height = layout.height as i32;
+
+    // Offsets are authored against the widest (desktop) layout; narrower layouts
+    // scale the preferred column down proportionally.
+    let widest_columns = board_layouts
+        .iter()
+        .map(|l| l.column_count)
+        .max()
+        .unwrap_or(width);
+
+    board_layouts
+        .iter()
+        .map(|board_layout| {
+            let clamped_width = width.min(board_layout.column_count);
+            let anchor = project_anchor(
+                layout.x_offset,
+                layout.y_offset,
+                board_layout.column_count,
+                widest_columns,
+                clamped_width,
+            );
+            let (x_offset, y_offset) = find_card_position(
+                board_items,
+                &board_layout.id,
+                board_layout.column_count,
+                clamped_width,
+                height,
+                anchor,
+            );
+            json!({
+                "layoutId": board_layout.id,
+                "sectionId": section_id,
+                "width": clamped_width,
+                "height": height,
+                "xOffset": x_offset,
+                "yOffset": y_offset
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1758,6 +1767,92 @@ mod tests {
     fn project_anchor_clamps_to_footprint() {
         // x scales to 4 but a 2-wide card in 4 columns can start at most at 2.
         assert_eq!(project_anchor(Some(11), None, 4, 12, 2), (2, 0));
+    }
+
+    #[test]
+    fn placement_routes_multicell_around_block() {
+        // A 2x2 card cannot overlap a 2x2 block at the origin. (2,0) and (0,2)
+        // are equidistant; lower row wins.
+        let items = vec![item_at(0, 0, 2, 2)];
+        assert_eq!(find_card_position(&items, LID, 10, 2, 2, (0, 0)), (2, 0));
+    }
+
+    #[test]
+    fn placement_tall_card_rejects_occupied_column() {
+        // A 1x3 card anchored at column 1 cannot start there because (1,1) is
+        // occupied, so its rows 0-2 don't all fit; it moves to the nearest clear
+        // column, (0,0).
+        let items = vec![item_at(1, 1, 1, 1)];
+        assert_eq!(find_card_position(&items, LID, 10, 1, 3, (1, 0)), (0, 0));
+    }
+
+    #[test]
+    fn placement_picks_nearer_column_by_distance() {
+        // Anchor (5,0) is occupied along with (4,0). The dist-1 cell (6,0) must
+        // win over closer-iterated but farther cells like (3,0) at dist 4.
+        let items = vec![item_at(4, 0, 2, 1)];
+        assert_eq!(find_card_position(&items, LID, 10, 1, 1, (5, 0)), (6, 0));
+    }
+
+    #[test]
+    fn placement_honors_nonzero_anchor_row() {
+        // An empty board still honors a preferred row below the (empty) occupied
+        // region instead of snapping the card to row 0.
+        assert_eq!(find_card_position(&[], LID, 10, 1, 1, (0, 3)), (0, 3));
+    }
+
+    // build_item_layouts tests
+
+    fn layout_config(
+        width: u8,
+        height: u8,
+        x: Option<u8>,
+        y: Option<u8>,
+    ) -> crate::registry::LayoutConfig {
+        crate::registry::LayoutConfig {
+            priority: 50,
+            width,
+            height,
+            x_offset: x,
+            y_offset: y,
+        }
+    }
+
+    #[test]
+    fn build_item_layouts_projects_and_places_per_layout() {
+        // Desktop (12 cols) and mobile (4 cols). A right-anchored 2-wide card
+        // (x_offset 11, authored against the widest layout) lands at the right
+        // edge on desktop and a proportionally scaled, clamped column on mobile.
+        let layouts = vec![
+            existing_layout("desktop", 1200, 12),
+            existing_layout("mobile", 0, 4),
+        ];
+        let cfg = layout_config(2, 1, Some(11), None);
+        let out = build_item_layouts(&layouts, &[], "sec", &cfg);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["layoutId"], "desktop");
+        assert_eq!(out[0]["width"], 2);
+        assert_eq!(out[0]["xOffset"], 10); // 12 - width 2
+        assert_eq!(out[1]["layoutId"], "mobile");
+        assert_eq!(out[1]["width"], 2); // clamped to 4-col grid (no change here)
+        assert_eq!(out[1]["xOffset"], 2); // 11*4/12 -> 4, clamped to 4-2
+    }
+
+    #[test]
+    fn build_item_layouts_clamps_width_to_narrow_layout() {
+        // A 6-wide card is clamped to the 4-column mobile grid.
+        let layouts = vec![existing_layout("mobile", 0, 4)];
+        let cfg = layout_config(6, 1, None, None);
+        let out = build_item_layouts(&layouts, &[], "sec", &cfg);
+        assert_eq!(out[0]["width"], 4);
+        assert_eq!(out[0]["xOffset"], 0);
+    }
+
+    #[test]
+    fn build_item_layouts_empty_layouts_yields_no_entries() {
+        let cfg = layout_config(1, 1, None, None);
+        assert!(build_item_layouts(&[], &[], "sec", &cfg).is_empty());
     }
 
     // build_layout_submission tests

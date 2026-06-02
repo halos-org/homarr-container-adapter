@@ -116,6 +116,22 @@ impl Board {
             .min_by_key(|l| l.breakpoint)
             .expect("board must define at least one layout")
     }
+
+    /// Check the layout list is usable: at least one layout, each with a
+    /// positive column count (a zero/negative count would yield zero-width
+    /// cards). Guarantees `base_layout` has something to return.
+    fn validate(&self) -> std::result::Result<(), String> {
+        if self.layouts.is_empty() {
+            return Err("board must define at least one layout".to_string());
+        }
+        if let Some(bad) = self.layouts.iter().find(|l| l.column_count < 1) {
+            return Err(format!(
+                "layout '{}' must have a column_count of at least 1",
+                bad.name
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,11 +171,7 @@ impl BrandingConfig {
         let contents = fs::read_to_string(path)?;
         let config: BrandingConfig = toml::from_str(&contents)?;
 
-        if config.board.layouts.is_empty() {
-            return Err(AdapterError::Config(
-                "board must define at least one layout".to_string(),
-            ));
-        }
+        config.board.validate().map_err(AdapterError::Config)?;
 
         Ok(config)
     }
@@ -203,5 +215,35 @@ mod tests {
         let board: Board = toml::from_str(toml).unwrap();
         let breakpoints: Vec<i32> = board.layouts.iter().map(|l| l.breakpoint).collect();
         assert_eq!(breakpoints, vec![0, 768, 1200]);
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_column_count() {
+        let toml = r#"
+            name = "Halos"
+            display_name = "Halos"
+            is_public = true
+
+            [[layouts]]
+            name = "Broken"
+            breakpoint = 0
+            column_count = 0
+        "#;
+        let board: Board = toml::from_str(toml).unwrap();
+        let err = board.validate().unwrap_err();
+        assert!(err.contains("Broken"), "error names the bad layout: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_default_layouts() {
+        let board: Board = toml::from_str(
+            r#"
+            name = "Halos"
+            display_name = "Halos"
+            is_public = true
+        "#,
+        )
+        .unwrap();
+        assert!(board.validate().is_ok());
     }
 }
