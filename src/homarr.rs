@@ -237,6 +237,33 @@ fn item_app_id(item: &serde_json::Value) -> Option<&str> {
         .and_then(|a| a.as_str())
 }
 
+/// Build the `board.saveLayouts` submission from the configured layouts and the
+/// board's existing ones. Each configured layout is keyed to an existing one by
+/// breakpoint: a match reuses the existing id (so Homarr treats it as an update
+/// and never deletes it), while an unmatched entry gets a placeholder id that
+/// Homarr replaces with a freshly generated one on insert.
+fn build_layout_submission(
+    configured: &[crate::branding::LayoutEntry],
+    existing: &[Layout],
+) -> Vec<serde_json::Value> {
+    configured
+        .iter()
+        .map(|entry| {
+            let id = existing
+                .iter()
+                .find(|layout| layout.breakpoint == entry.breakpoint)
+                .map(|layout| layout.id.clone())
+                .unwrap_or_else(|| format!("new-{}", entry.breakpoint));
+            json!({
+                "id": id,
+                "name": entry.name,
+                "columnCount": entry.column_count,
+                "breakpoint": entry.breakpoint,
+            })
+        })
+        .collect()
+}
+
 /// Split board items into (kept, removed_count) for items pointing at `app_id`.
 fn partition_items_by_app_id(
     items: Vec<serde_json::Value>,
@@ -494,8 +521,11 @@ impl HomarrClient {
 
         // Ensure the board carries the configured responsive layouts. Runs for
         // both freshly created and pre-existing boards so migrations pick up new
-        // breakpoints, and is idempotent on already-migrated boards.
-        self.ensure_layouts(branding).await?;
+        // breakpoints, and is idempotent on already-migrated boards. A failure
+        // here leaves a usable single-layout board, so it must not abort setup.
+        if let Err(e) = self.ensure_layouts(branding).await {
+            tracing::warn!("Failed to ensure responsive layouts: {}", e);
+        }
 
         // Apply board branding settings (page title, logo, colors, etc.)
         self.save_board_branding_settings(&board_id, branding)
@@ -631,24 +661,7 @@ impl HomarrClient {
         }
 
         let board = self.get_board_by_name(&branding.board.name).await?;
-
-        let layouts: Vec<serde_json::Value> = configured
-            .iter()
-            .map(|entry| {
-                let id = board
-                    .layouts
-                    .iter()
-                    .find(|existing| existing.breakpoint == entry.breakpoint)
-                    .map(|existing| existing.id.clone())
-                    .unwrap_or_else(|| format!("new-{}", entry.breakpoint));
-                json!({
-                    "id": id,
-                    "name": entry.name,
-                    "columnCount": entry.column_count,
-                    "breakpoint": entry.breakpoint,
-                })
-            })
-            .collect();
+        let layouts = build_layout_submission(configured, &board.layouts);
 
         let url = format!("{}/api/trpc/board.saveLayouts", self.base_url);
         let payload = json!({ "json": { "id": board.id, "layouts": layouts } });
@@ -1677,6 +1690,72 @@ mod tests {
         })];
         assert_eq!(client.find_next_position(&items, LID, 4), (2, 0));
         assert_eq!(client.find_next_position(&items, "wide", 12), (6, 0));
+    }
+
+    // build_layout_submission tests
+
+    fn layout_entry(
+        name: &str,
+        breakpoint: i32,
+        column_count: i32,
+    ) -> crate::branding::LayoutEntry {
+        crate::branding::LayoutEntry {
+            name: name.to_string(),
+            breakpoint,
+            column_count,
+        }
+    }
+
+    fn existing_layout(id: &str, breakpoint: i32, column_count: i32) -> Layout {
+        Layout {
+            id: id.to_string(),
+            name: "Base".to_string(),
+            column_count,
+            breakpoint,
+        }
+    }
+
+    #[test]
+    fn build_layout_submission_preserves_base_id_and_adds_new() {
+        // A board created with a single base layout: the base breakpoint reuses
+        // its real id (so it is updated, not deleted), and the other breakpoints
+        // get placeholder ids to be inserted.
+        let configured = vec![
+            layout_entry("Mobile", 0, 4),
+            layout_entry("Tablet", 768, 6),
+            layout_entry("Desktop", 1200, 12),
+        ];
+        let existing = vec![existing_layout("base-real-id", 0, 12)];
+
+        let out = build_layout_submission(&configured, &existing);
+
+        assert_eq!(out[0]["id"], "base-real-id");
+        assert_eq!(out[0]["columnCount"], 4); // base reflowed from 12 to 4
+        assert_eq!(out[1]["id"], "new-768");
+        assert_eq!(out[2]["id"], "new-1200");
+    }
+
+    #[test]
+    fn build_layout_submission_is_idempotent_on_migrated_board() {
+        // Every configured breakpoint already exists: all ids are reused, so
+        // saveLayouts sees only updates (no inserts, no deletes).
+        let configured = vec![
+            layout_entry("Mobile", 0, 4),
+            layout_entry("Desktop", 1200, 12),
+        ];
+        let existing = vec![
+            existing_layout("id-desktop", 1200, 12),
+            existing_layout("id-mobile", 0, 4),
+        ];
+
+        let out = build_layout_submission(&configured, &existing);
+
+        // Matched by breakpoint regardless of ordering; no placeholder ids.
+        assert_eq!(out[0]["id"], "id-mobile");
+        assert_eq!(out[1]["id"], "id-desktop");
+        assert!(!out
+            .iter()
+            .any(|l| l["id"].as_str().unwrap().starts_with("new-")));
     }
 
     // transform_icon_url tests

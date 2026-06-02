@@ -155,6 +155,12 @@ impl BrandingConfig {
         let contents = fs::read_to_string(path)?;
         let config: BrandingConfig = toml::from_str(&contents)?;
 
+        if config.board.layouts.is_empty() {
+            return Err(AdapterError::Config(
+                "board must define at least one layout".to_string(),
+            ));
+        }
+
         Ok(config)
     }
 }
