@@ -214,8 +214,8 @@ async fn discover_webapps_inner(
                 priority: 45,
                 width: 2,
                 height: 1,
-                x_offset: None,
-                y_offset: None,
+                x_offset: Some(0),
+                y_offset: Some(3),
             },
         });
     }
@@ -432,8 +432,8 @@ mod tests {
                     priority: 45,
                     width: 2,
                     height: 1,
-                    x_offset: None,
-                    y_offset: None,
+                    x_offset: Some(0),
+                    y_offset: Some(3),
                 },
             });
         }
