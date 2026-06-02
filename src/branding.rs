@@ -72,8 +72,50 @@ pub struct Credentials {
 pub struct Board {
     pub name: String,
     pub display_name: String,
-    pub column_count: u8,
+    #[serde(default = "default_layouts")]
+    pub layouts: Vec<LayoutEntry>,
     pub is_public: bool,
+}
+
+/// A single responsive layout: a column count that applies from `breakpoint`
+/// pixels of viewport width upward, until the next-larger breakpoint takes over.
+#[derive(Debug, Deserialize, Clone)]
+pub struct LayoutEntry {
+    pub name: String,
+    pub breakpoint: i32,
+    pub column_count: i32,
+}
+
+fn default_layouts() -> Vec<LayoutEntry> {
+    vec![
+        LayoutEntry {
+            name: "Mobile".to_string(),
+            breakpoint: 0,
+            column_count: 4,
+        },
+        LayoutEntry {
+            name: "Tablet".to_string(),
+            breakpoint: 768,
+            column_count: 6,
+        },
+        LayoutEntry {
+            name: "Desktop".to_string(),
+            breakpoint: 1200,
+            column_count: 12,
+        },
+    ]
+}
+
+impl Board {
+    /// The base layout (smallest breakpoint, normally 0). Homarr falls back to
+    /// the smallest-breakpoint layout for very narrow viewports, and its column
+    /// count seeds the board at creation time.
+    pub fn base_layout(&self) -> &LayoutEntry {
+        self.layouts
+            .iter()
+            .min_by_key(|l| l.breakpoint)
+            .expect("board must define at least one layout")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +155,53 @@ impl BrandingConfig {
         let contents = fs::read_to_string(path)?;
         let config: BrandingConfig = toml::from_str(&contents)?;
 
+        if config.board.layouts.is_empty() {
+            return Err(AdapterError::Config(
+                "board must define at least one layout".to_string(),
+            ));
+        }
+
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn board_parses_responsive_layout_list() {
+        let toml = r#"
+            name = "Halos"
+            display_name = "Halos"
+            is_public = true
+
+            [[layouts]]
+            name = "Mobile"
+            breakpoint = 0
+            column_count = 4
+
+            [[layouts]]
+            name = "Desktop"
+            breakpoint = 1200
+            column_count = 12
+        "#;
+        let board: Board = toml::from_str(toml).unwrap();
+        assert_eq!(board.layouts.len(), 2);
+        // base_layout picks the smallest breakpoint regardless of order
+        assert_eq!(board.base_layout().breakpoint, 0);
+        assert_eq!(board.base_layout().column_count, 4);
+    }
+
+    #[test]
+    fn board_without_layouts_falls_back_to_defaults() {
+        let toml = r#"
+            name = "Halos"
+            display_name = "Halos"
+            is_public = true
+        "#;
+        let board: Board = toml::from_str(toml).unwrap();
+        let breakpoints: Vec<i32> = board.layouts.iter().map(|l| l.breakpoint).collect();
+        assert_eq!(breakpoints, vec![0, 768, 1200]);
     }
 }
