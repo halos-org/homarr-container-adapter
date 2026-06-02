@@ -492,6 +492,11 @@ impl HomarrClient {
             self.create_board(branding).await?
         };
 
+        // Ensure the board carries the configured responsive layouts. Runs for
+        // both freshly created and pre-existing boards so migrations pick up new
+        // breakpoints, and is idempotent on already-migrated boards.
+        self.ensure_layouts(branding).await?;
+
         // Apply board branding settings (page title, logo, colors, etc.)
         self.save_board_branding_settings(&board_id, branding)
             .await?;
@@ -599,7 +604,7 @@ impl HomarrClient {
         let payload = json!({
             "json": {
                 "name": branding.board.name,
-                "columnCount": branding.board.column_count,
+                "columnCount": branding.board.base_layout().column_count,
                 "isPublic": branding.board.is_public
             }
         });
@@ -608,6 +613,63 @@ impl HomarrClient {
         let trpc_response: TrpcResponse<CreateBoardResponse> = response.json().await?;
 
         Ok(trpc_response.result.data.json.board_id)
+    }
+
+    /// Reconcile the board's responsive layouts with the branding configuration.
+    ///
+    /// `board.saveLayouts` matches submitted layouts against existing ones by id:
+    /// a known id is updated (and item positions reflowed if the column count
+    /// changes), an unknown id is inserted (cloning positions from the nearest
+    /// layout), and any existing layout absent from the submission is deleted.
+    /// We key configured layouts to existing ones by breakpoint, preserving the
+    /// real id of every match so nothing is destroyed.
+    async fn ensure_layouts(&self, branding: &BrandingConfig) -> Result<()> {
+        let configured = &branding.board.layouts;
+        if configured.is_empty() {
+            tracing::warn!("No layouts configured for board; skipping layout setup");
+            return Ok(());
+        }
+
+        let board = self.get_board_by_name(&branding.board.name).await?;
+
+        let layouts: Vec<serde_json::Value> = configured
+            .iter()
+            .map(|entry| {
+                let id = board
+                    .layouts
+                    .iter()
+                    .find(|existing| existing.breakpoint == entry.breakpoint)
+                    .map(|existing| existing.id.clone())
+                    .unwrap_or_else(|| format!("new-{}", entry.breakpoint));
+                json!({
+                    "id": id,
+                    "name": entry.name,
+                    "columnCount": entry.column_count,
+                    "breakpoint": entry.breakpoint,
+                })
+            })
+            .collect();
+
+        let url = format!("{}/api/trpc/board.saveLayouts", self.base_url);
+        let payload = json!({ "json": { "id": board.id, "layouts": layouts } });
+        let response = self.post_json(&url, &payload).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "board.saveLayouts returned {}: {}",
+                status, text
+            )));
+        }
+
+        tracing::info!(
+            "Ensured {} responsive layout(s) on board '{}'",
+            configured.len(),
+            branding.board.name
+        );
+
+        Ok(())
     }
 
     /// Set user's home board
@@ -1157,22 +1219,43 @@ impl HomarrClient {
             .first()
             .map(|s| s.id.clone())
             .unwrap_or_default();
-        let layout_id = board
-            .layouts
-            .first()
-            .map(|l| l.id.clone())
-            .unwrap_or_default();
 
         // Get layout preferences from registry
         let layout = app.effective_layout();
         let width = layout.width as i32;
         let height = layout.height as i32;
-
-        // Use explicit position if provided, otherwise auto-position
-        let (x_offset, y_offset) = match (layout.x_offset, layout.y_offset) {
-            (Some(x), Some(y)) => (x as i32, y as i32),
-            _ => self.find_next_position(&board_items, 12), // 12 columns for new layout
+        let explicit_offset = match (layout.x_offset, layout.y_offset) {
+            (Some(x), Some(y)) => Some((x as i32, y as i32)),
+            _ => None,
         };
+
+        // Position the card independently on every responsive layout: each grid
+        // has a different column count, so an item needs its own placement per
+        // layout, and a layout with no entry would drop the card on that
+        // breakpoint. Width is clamped to the column count to match Homarr's own
+        // reflow behaviour on narrow grids.
+        let item_layouts: Vec<serde_json::Value> = board
+            .layouts
+            .iter()
+            .map(|board_layout| {
+                let (x_offset, y_offset) = match explicit_offset {
+                    Some(offset) => offset,
+                    None => self.find_next_position(
+                        &board_items,
+                        &board_layout.id,
+                        board_layout.column_count,
+                    ),
+                };
+                json!({
+                    "layoutId": board_layout.id,
+                    "sectionId": section_id,
+                    "width": width.min(board_layout.column_count),
+                    "height": height,
+                    "xOffset": x_offset,
+                    "yOffset": y_offset
+                })
+            })
+            .collect();
 
         // Generate a unique ID for this board item
         // Use container name if available, otherwise use a hash of the URL
@@ -1191,14 +1274,7 @@ impl HomarrClient {
             "options": {
                 "appId": app_id
             },
-            "layouts": [{
-                "layoutId": layout_id,
-                "sectionId": section_id,
-                "width": width,
-                "height": height,
-                "xOffset": x_offset,
-                "yOffset": y_offset
-            }],
+            "layouts": item_layouts,
             "integrationIds": [],
             "advancedOptions": {
                 "customCssClasses": []
@@ -1217,10 +1293,9 @@ impl HomarrClient {
         self.post_json(&url, &payload).await?;
 
         tracing::debug!(
-            "Added registry app '{}' to board at ({}, {}) size {}x{}",
+            "Added registry app '{}' to board across {} layout(s) size {}x{}",
             app.name,
-            x_offset,
-            y_offset,
+            item_layouts.len(),
             width,
             height
         );
@@ -1261,14 +1336,24 @@ impl HomarrClient {
         Ok(items)
     }
 
-    /// Find next available position on the board (simple left-to-right, top-to-bottom)
-    fn find_next_position(&self, items: &[serde_json::Value], column_count: i32) -> (i32, i32) {
+    /// Find next available position for a single layout (simple
+    /// left-to-right, top-to-bottom). Only the target layout's entries are
+    /// considered, so positions from other column grids do not blend in.
+    fn find_next_position(
+        &self,
+        items: &[serde_json::Value],
+        layout_id: &str,
+        column_count: i32,
+    ) -> (i32, i32) {
         let mut max_y = 0;
         let mut positions_in_max_row: Vec<i32> = vec![];
 
         for item in items {
             if let Some(layouts) = item.get("layouts").and_then(|l| l.as_array()) {
                 for layout in layouts {
+                    if layout.get("layoutId").and_then(|id| id.as_str()) != Some(layout_id) {
+                        continue;
+                    }
                     let x = layout.get("xOffset").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
                     let y = layout.get("yOffset").and_then(|y| y.as_i64()).unwrap_or(0) as i32;
                     let h = layout.get("height").and_then(|h| h.as_i64()).unwrap_or(1) as i32;
@@ -1458,26 +1543,35 @@ mod tests {
     }
 
     // find_next_position tests
+
+    const LID: &str = "layout-a";
+
+    /// Build a board item carrying a single layout entry for layout `LID`.
+    fn item_at(x: i64, y: i64, width: i64, height: i64) -> serde_json::Value {
+        json!({
+            "layouts": [{
+                "layoutId": LID,
+                "xOffset": x,
+                "yOffset": y,
+                "width": width,
+                "height": height
+            }]
+        })
+    }
+
     #[test]
     fn test_find_next_position_empty_board() {
         let client = create_test_client();
         let items: Vec<serde_json::Value> = vec![];
-        let (x, y) = client.find_next_position(&items, 10);
+        let (x, y) = client.find_next_position(&items, LID, 10);
         assert_eq!((x, y), (0, 0));
     }
 
     #[test]
     fn test_find_next_position_single_item() {
         let client = create_test_client();
-        let items = vec![json!({
-            "layouts": [{
-                "xOffset": 0,
-                "yOffset": 0,
-                "width": 1,
-                "height": 1
-            }]
-        })];
-        let (x, y) = client.find_next_position(&items, 10);
+        let items = vec![item_at(0, 0, 1, 1)];
+        let (x, y) = client.find_next_position(&items, LID, 10);
         // Should place next to the existing item
         assert_eq!((x, y), (1, 0));
     }
@@ -1486,19 +1580,8 @@ mod tests {
     fn test_find_next_position_full_row() {
         let client = create_test_client();
         // Fill all 10 columns in row 0
-        let items: Vec<serde_json::Value> = (0..10)
-            .map(|i| {
-                json!({
-                    "layouts": [{
-                        "xOffset": i,
-                        "yOffset": 0,
-                        "width": 1,
-                        "height": 1
-                    }]
-                })
-            })
-            .collect();
-        let (x, y) = client.find_next_position(&items, 10);
+        let items: Vec<serde_json::Value> = (0..10).map(|i| item_at(i, 0, 1, 1)).collect();
+        let (x, y) = client.find_next_position(&items, LID, 10);
         // Should start a new row
         assert_eq!((x, y), (0, 1));
     }
@@ -1507,25 +1590,8 @@ mod tests {
     fn test_find_next_position_with_gap() {
         let client = create_test_client();
         // Items at positions 0 and 2, leaving gap at 1
-        let items = vec![
-            json!({
-                "layouts": [{
-                    "xOffset": 0,
-                    "yOffset": 0,
-                    "width": 1,
-                    "height": 1
-                }]
-            }),
-            json!({
-                "layouts": [{
-                    "xOffset": 2,
-                    "yOffset": 0,
-                    "width": 1,
-                    "height": 1
-                }]
-            }),
-        ];
-        let (x, y) = client.find_next_position(&items, 10);
+        let items = vec![item_at(0, 0, 1, 1), item_at(2, 0, 1, 1)];
+        let (x, y) = client.find_next_position(&items, LID, 10);
         // Should fill the gap at position 1
         assert_eq!((x, y), (1, 0));
     }
@@ -1534,15 +1600,8 @@ mod tests {
     fn test_find_next_position_wide_item() {
         let client = create_test_client();
         // Wide item taking columns 0-2
-        let items = vec![json!({
-            "layouts": [{
-                "xOffset": 0,
-                "yOffset": 0,
-                "width": 3,
-                "height": 1
-            }]
-        })];
-        let (x, y) = client.find_next_position(&items, 10);
+        let items = vec![item_at(0, 0, 3, 1)];
+        let (x, y) = client.find_next_position(&items, LID, 10);
         // Should place at column 3
         assert_eq!((x, y), (3, 0));
     }
@@ -1551,15 +1610,8 @@ mod tests {
     fn test_find_next_position_tall_item() {
         let client = create_test_client();
         // Tall item at position 0
-        let items = vec![json!({
-            "layouts": [{
-                "xOffset": 0,
-                "yOffset": 0,
-                "width": 1,
-                "height": 3
-            }]
-        })];
-        let (x, y) = client.find_next_position(&items, 10);
+        let items = vec![item_at(0, 0, 1, 3)];
+        let (x, y) = client.find_next_position(&items, LID, 10);
         // Should place in the same row but different column
         assert_eq!((x, y), (1, 2));
     }
@@ -1568,25 +1620,8 @@ mod tests {
     fn test_find_next_position_multiple_rows() {
         let client = create_test_client();
         // Items in multiple rows
-        let items = vec![
-            json!({
-                "layouts": [{
-                    "xOffset": 0,
-                    "yOffset": 0,
-                    "width": 10,
-                    "height": 1
-                }]
-            }),
-            json!({
-                "layouts": [{
-                    "xOffset": 0,
-                    "yOffset": 1,
-                    "width": 5,
-                    "height": 1
-                }]
-            }),
-        ];
-        let (x, y) = client.find_next_position(&items, 10);
+        let items = vec![item_at(0, 0, 10, 1), item_at(0, 1, 5, 1)];
+        let (x, y) = client.find_next_position(&items, LID, 10);
         // Should place after the item in row 1
         assert_eq!((x, y), (5, 1));
     }
@@ -1595,19 +1630,8 @@ mod tests {
     fn test_find_next_position_small_column_count() {
         let client = create_test_client();
         // Fill a 3-column board
-        let items: Vec<serde_json::Value> = (0..3)
-            .map(|i| {
-                json!({
-                    "layouts": [{
-                        "xOffset": i,
-                        "yOffset": 0,
-                        "width": 1,
-                        "height": 1
-                    }]
-                })
-            })
-            .collect();
-        let (x, y) = client.find_next_position(&items, 3);
+        let items: Vec<serde_json::Value> = (0..3).map(|i| item_at(i, 0, 1, 1)).collect();
+        let (x, y) = client.find_next_position(&items, LID, 3);
         // Should start a new row
         assert_eq!((x, y), (0, 1));
     }
@@ -1617,9 +1641,42 @@ mod tests {
         let client = create_test_client();
         // Items missing layouts field
         let items = vec![json!({"id": "item1"}), json!({"layouts": []})];
-        let (x, y) = client.find_next_position(&items, 10);
+        let (x, y) = client.find_next_position(&items, LID, 10);
         // Should handle gracefully and start at origin
         assert_eq!((x, y), (0, 0));
+    }
+
+    #[test]
+    fn test_find_next_position_ignores_other_layouts() {
+        let client = create_test_client();
+        // An item occupying column 0 on a different layout must not influence
+        // placement on the target layout, which should stay empty at origin.
+        let items = vec![json!({
+            "layouts": [{
+                "layoutId": "other-layout",
+                "xOffset": 0,
+                "yOffset": 0,
+                "width": 4,
+                "height": 1
+            }]
+        })];
+        let (x, y) = client.find_next_position(&items, LID, 10);
+        assert_eq!((x, y), (0, 0));
+    }
+
+    #[test]
+    fn test_find_next_position_scopes_to_target_layout() {
+        let client = create_test_client();
+        // One item carries entries for two layouts at different positions. Each
+        // layout must be packed independently.
+        let items = vec![json!({
+            "layouts": [
+                {"layoutId": LID, "xOffset": 0, "yOffset": 0, "width": 2, "height": 1},
+                {"layoutId": "wide", "xOffset": 0, "yOffset": 0, "width": 6, "height": 1}
+            ]
+        })];
+        assert_eq!(client.find_next_position(&items, LID, 4), (2, 0));
+        assert_eq!(client.find_next_position(&items, "wide", 12), (6, 0));
     }
 
     // transform_icon_url tests
