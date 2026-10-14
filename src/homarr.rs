@@ -1362,7 +1362,8 @@ impl HomarrClient {
         app: &AppDefinition,
         board_name: &str,
     ) -> Result<()> {
-        let mut board_items = self.get_board_items(board_name).await.unwrap_or_default();
+        // An empty fallback would make the save below drop every other card
+        let mut board_items = self.get_board_items(board_name).await?;
 
         // Check if this app is already on the board
         if board_has_app(&board_items, app_id) {
