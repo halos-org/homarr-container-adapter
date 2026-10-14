@@ -240,6 +240,43 @@ fn item_app_id(item: &serde_json::Value) -> Option<&str> {
         .and_then(|a| a.as_str())
 }
 
+/// Prefix of board item ids the adapter creates, distinguishing its cards from
+/// ones a user placed by hand.
+const REGISTRY_ITEM_PREFIX: &str = "registry-";
+
+/// Options for a new app board item. External apps have no ping URL, and
+/// Homarr v2 would otherwise ping the (possibly path-only) href, fail to parse
+/// it and show a red status dot.
+fn app_item_options(app_id: &str, external: bool) -> serde_json::Value {
+    let mut options = json!({ "appId": app_id });
+    if external {
+        options["pingEnabled"] = json!(false);
+    }
+    options
+}
+
+/// Set `pingEnabled: false` on adapter-created items for `app_id` that lack it,
+/// returning how many items changed. Items placed by a user are left alone.
+fn disable_ping_on_adapter_items(items: &mut [serde_json::Value], app_id: &str) -> usize {
+    let mut changed = 0;
+    for item in items.iter_mut() {
+        let adapter_created = item
+            .get("id")
+            .and_then(|id| id.as_str())
+            .is_some_and(|id| id.starts_with(REGISTRY_ITEM_PREFIX));
+        if !adapter_created || item_app_id(item) != Some(app_id) {
+            continue;
+        }
+        if let Some(options) = item.get_mut("options").and_then(|o| o.as_object_mut()) {
+            if options.get("pingEnabled") != Some(&json!(false)) {
+                options.insert("pingEnabled".to_string(), json!(false));
+                changed += 1;
+            }
+        }
+    }
+    changed
+}
+
 /// Build the `board.saveLayouts` submission from the configured layouts and the
 /// board's existing ones. Each configured layout is keyed to an existing one by
 /// breakpoint: a match reuses the existing id (so Homarr treats it as an update
@@ -1229,10 +1266,39 @@ impl HomarrClient {
         app: &AppDefinition,
         board_name: &str,
     ) -> Result<()> {
-        let board_items = self.get_board_items(board_name).await.unwrap_or_default();
+        let mut board_items = self.get_board_items(board_name).await.unwrap_or_default();
 
         // Check if this app is already on the board
         if board_has_app(&board_items, app_id) {
+            // Cards placed before external apps got pingEnabled=false need it
+            // added, or Homarr v2 keeps showing a failing ping indicator.
+            if app.is_external() && disable_ping_on_adapter_items(&mut board_items, app_id) > 0 {
+                let board = self.get_board_by_name(board_name).await?;
+                let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
+                let payload = json!({
+                    "json": {
+                        "id": board.id,
+                        "sections": board.sections,
+                        "items": board_items,
+                        "integrations": []
+                    }
+                });
+                let response = self.post_json(&url, &payload).await?;
+                if !response.status().is_success() {
+                    let text = response.text().await.unwrap_or_default();
+                    return Err(AdapterError::HomarrApi(format!(
+                        "Failed to save board '{}' while disabling ping for '{}': {}",
+                        board_name, app.name, text
+                    )));
+                }
+                tracing::info!(
+                    "Disabled ping indicator for external app '{}' on board '{}'",
+                    app.name,
+                    board_name
+                );
+                return Ok(());
+            }
+
             tracing::info!(
                 "Registry app '{}' already on board '{}', skipping",
                 app.name,
@@ -1256,9 +1322,9 @@ impl HomarrClient {
         // Generate a unique ID for this board item
         // Use container name if available, otherwise use a hash of the URL
         let item_id = if let Some(container) = app.container_name() {
-            format!("registry-{}", container)
+            format!("{}{}", REGISTRY_ITEM_PREFIX, container)
         } else {
-            format!("registry-{:x}", string_hash(&app.url))
+            format!("{}{:x}", REGISTRY_ITEM_PREFIX, string_hash(&app.url))
         };
 
         let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
@@ -1267,9 +1333,7 @@ impl HomarrClient {
         items.push(json!({
             "id": item_id,
             "kind": "app",
-            "options": {
-                "appId": app_id
-            },
+            "options": app_item_options(app_id, app.is_external()),
             "layouts": item_layouts,
             "integrationIds": [],
             "advancedOptions": {
@@ -2154,6 +2218,86 @@ mod tests {
 
         // Should not crash and should return false for all
         assert!(!board_has_app(&items, "any-app-id"));
+    }
+
+    // Tests for external-app ping handling
+
+    #[test]
+    fn app_item_options_disable_ping_for_external_app() {
+        assert_eq!(
+            app_item_options("app-1", true),
+            json!({"appId": "app-1", "pingEnabled": false})
+        );
+    }
+
+    #[test]
+    fn app_item_options_leave_ping_unset_for_regular_app() {
+        let options = app_item_options("app-1", false);
+        assert_eq!(options, json!({"appId": "app-1"}));
+        assert!(options.get("pingEnabled").is_none());
+    }
+
+    #[test]
+    fn disable_ping_patches_adapter_item_and_leaves_others() {
+        let mut items = vec![
+            item_for_app("registry-abc", "ext-app"),
+            item_for_app("registry-cockpit", "other-app"),
+        ];
+        let untouched = items[1].clone();
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 1);
+
+        assert_eq!(items[0]["options"]["pingEnabled"], json!(false));
+        assert_eq!(items[0]["options"]["appId"], "ext-app");
+        assert_eq!(items[1], untouched);
+    }
+
+    #[test]
+    fn disable_ping_is_noop_when_already_disabled() {
+        let mut items = vec![json!({
+            "id": "registry-abc",
+            "kind": "app",
+            "options": {"appId": "ext-app", "pingEnabled": false}
+        })];
+        let before = items.clone();
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 0);
+        assert_eq!(items, before);
+    }
+
+    #[test]
+    fn disable_ping_overrides_enabled_ping_on_adapter_item() {
+        let mut items = vec![json!({
+            "id": "registry-abc",
+            "kind": "app",
+            "options": {"appId": "ext-app", "pingEnabled": true}
+        })];
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 1);
+        assert_eq!(items[0]["options"]["pingEnabled"], json!(false));
+    }
+
+    #[test]
+    fn disable_ping_skips_user_created_item_for_same_app() {
+        // A card the user placed themselves keeps whatever ping setting they chose.
+        let mut items = vec![item_for_app("user-made-item", "ext-app")];
+        let before = items.clone();
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 0);
+        assert_eq!(items, before);
+    }
+
+    #[test]
+    fn disable_ping_handles_malformed_items() {
+        let mut items = vec![
+            json!({"id": "registry-no-options"}),
+            json!({"id": "registry-null-options", "options": null}),
+            json!({"kind": "app", "options": {"appId": "ext-app"}}),
+        ];
+        let before = items.clone();
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 0);
+        assert_eq!(items, before);
     }
 
     // Tests for partition_items_by_app_id (cascade-delete helper)
