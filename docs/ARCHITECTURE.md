@@ -120,10 +120,12 @@ src/
 5. If onboarding not complete:
    a. Complete onboarding wizard
    b. Configure settings
-6. Create/update board with branding
-7. Sync Authelia credentials if needed
-8. Mark first_boot_completed = true
-9. Save state
+6. If the configured board does not exist yet, delete the sample board and
+   apps that Homarr v2 seeds into an empty database
+7. Create/update board with branding
+8. Sync Authelia credentials if needed
+9. Mark first_boot_completed = true
+10. Save state
 ```
 
 ### Container Sync Flow (Multi-Board)
