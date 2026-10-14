@@ -240,6 +240,50 @@ fn item_app_id(item: &serde_json::Value) -> Option<&str> {
         .and_then(|a| a.as_str())
 }
 
+/// Board created by Homarr v2's startup seeder (`packages/db/migrations/seed.ts`)
+/// when the database holds no board.
+const HOMARR_SEED_BOARD_NAME: &str = "dashboard";
+
+/// Hrefs of the sample apps Homarr v2.5.2's seeder creates when the database
+/// holds no app (`defaultBookmarkApps`), as rendered into the database.
+const HOMARR_SEED_APP_HREFS: [&str; 4] = [
+    "https://homarr.dev/docs/getting-started",
+    "https://github.com/homarr-labs/homarr",
+    "https://homarr.dev/docs/community/translations",
+    "https://opencollective.com/homarr",
+];
+
+/// Select the boards and apps Homarr's seeder added on a fresh install.
+///
+/// Selects nothing once the configured board exists: from then on any board or
+/// app matching the samples may be the user's own.
+fn select_homarr_seed_samples<'a>(
+    boards: &'a [BoardWithPermission],
+    apps: &'a [SelectableApp],
+    configured_board: &str,
+) -> (Vec<&'a BoardWithPermission>, Vec<&'a SelectableApp>) {
+    // Case-insensitive like Homarr's board lookup, which setup_default_board uses
+    if boards
+        .iter()
+        .any(|b| b.name.eq_ignore_ascii_case(configured_board))
+    {
+        return (vec![], vec![]);
+    }
+    let seed_boards = boards
+        .iter()
+        .filter(|b| b.name == HOMARR_SEED_BOARD_NAME)
+        .collect();
+    let seed_apps = apps
+        .iter()
+        .filter(|a| {
+            a.href
+                .as_deref()
+                .is_some_and(|href| HOMARR_SEED_APP_HREFS.contains(&href))
+        })
+        .collect();
+    (seed_boards, seed_apps)
+}
+
 /// Prefix of board item ids the adapter creates, distinguishing its cards from
 /// ones a user placed by hand.
 const REGISTRY_ITEM_PREFIX: &str = "registry-";
@@ -932,6 +976,58 @@ impl HomarrClient {
         Ok(boards.into_iter().filter(|b| b.is_writable()).collect())
     }
 
+    /// Delete the sample board and apps Homarr's seeder adds to a fresh
+    /// install, so HaLOS apps are not synced onto a stray board.
+    ///
+    /// The seeded board is also the everyone group's home board, which
+    /// outranks the server-wide home board; deleting it clears that link.
+    /// Individual deletion failures are logged and skipped.
+    pub async fn remove_homarr_seed_samples(&self, configured_board: &str) -> Result<()> {
+        let boards = self.get_all_boards().await?;
+        let apps = self.get_all_apps().await?;
+        let (seed_boards, seed_apps) = select_homarr_seed_samples(&boards, &apps, configured_board);
+
+        for board in seed_boards {
+            match self.delete_board(&board.id).await {
+                Ok(()) => tracing::info!("Deleted Homarr sample board '{}'", board.name),
+                Err(e) => tracing::warn!(
+                    "Failed to delete Homarr sample board '{}': {}",
+                    board.name,
+                    e
+                ),
+            }
+        }
+        // The sample apps' items lived on the seeded board deleted above, so
+        // the bare delete leaves no orphan items to sweep.
+        for app in seed_apps {
+            match self.delete_app(&app.id).await {
+                Ok(()) => tracing::info!("Deleted Homarr sample app '{}'", app.name),
+                Err(e) => {
+                    tracing::warn!("Failed to delete Homarr sample app '{}': {}", app.name, e)
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_board(&self, board_id: &str) -> Result<()> {
+        let url = format!("{}/api/trpc/board.deleteBoard", self.base_url);
+        let payload = json!({ "json": { "id": board_id } });
+
+        let response = self.post_json(&url, &payload).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "board.deleteBoard('{}') returned {}: {}",
+                board_id, status, text
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Find an existing app by URL in a pre-fetched list.
     ///
     /// Two-tier matching:
@@ -1138,11 +1234,11 @@ impl HomarrClient {
     /// Delete an app from Homarr's global registry
     ///
     /// Note: this is the bare delete and does NOT remove board items pointing
-    /// at the deleted appId. Production callers should use
-    /// [`delete_app_and_orphan_items`](Self::delete_app_and_orphan_items) so
-    /// orphan items don't render as "No app" placeholders. This bare variant
-    /// is kept available for tests and any future caller that explicitly
-    /// wants global-only deletion.
+    /// at the deleted appId. Callers that may leave such items behind should
+    /// use [`delete_app_and_orphan_items`](Self::delete_app_and_orphan_items)
+    /// so they don't render as "No app" placeholders. The bare delete is right
+    /// when the board holding the app's items is already gone, as in
+    /// [`remove_homarr_seed_samples`](Self::remove_homarr_seed_samples).
     pub async fn delete_app(&self, app_id: &str) -> Result<()> {
         let url = format!("{}/api/trpc/app.delete", self.base_url);
         let payload = json!({
@@ -2218,6 +2314,121 @@ mod tests {
 
         // Should not crash and should return false for all
         assert!(!board_has_app(&items, "any-app-id"));
+    }
+
+    // Tests for Homarr seed sample selection
+
+    fn board(id: &str, name: &str) -> BoardWithPermission {
+        BoardWithPermission {
+            id: id.to_string(),
+            name: name.to_string(),
+            is_public: false,
+            user_permissions: vec![],
+            group_permissions: vec![],
+        }
+    }
+
+    fn seeded_apps() -> Vec<SelectableApp> {
+        vec![
+            selectable(
+                "s1",
+                "Homarr Docs",
+                Some("https://homarr.dev/docs/getting-started"),
+            ),
+            selectable(
+                "s2",
+                "Homarr GitHub",
+                Some("https://github.com/homarr-labs/homarr"),
+            ),
+            selectable(
+                "s3",
+                "Help Translate",
+                Some("https://homarr.dev/docs/community/translations"),
+            ),
+            selectable(
+                "s4",
+                "Support Homarr",
+                Some("https://opencollective.com/homarr"),
+            ),
+        ]
+    }
+
+    fn ids<T>(items: &[&T], id: impl Fn(&T) -> &str) -> Vec<String> {
+        items.iter().map(|i| id(i).to_string()).collect()
+    }
+
+    #[test]
+    fn seed_samples_selects_seeded_board_and_apps_on_fresh_install() {
+        let boards = vec![board("b1", "dashboard")];
+        let apps = seeded_apps();
+
+        let (boards_sel, apps_sel) = select_homarr_seed_samples(&boards, &apps, "Halos");
+
+        assert_eq!(ids(&boards_sel, |b| &b.id), vec!["b1"]);
+        assert_eq!(ids(&apps_sel, |a| &a.id), vec!["s1", "s2", "s3", "s4"]);
+    }
+
+    #[test]
+    fn seed_samples_selects_nothing_when_configured_board_exists() {
+        let boards = vec![board("b1", "dashboard"), board("b2", "Halos")];
+        let apps = seeded_apps();
+
+        let (boards_sel, apps_sel) = select_homarr_seed_samples(&boards, &apps, "Halos");
+
+        assert!(boards_sel.is_empty());
+        assert!(apps_sel.is_empty());
+    }
+
+    #[test]
+    fn seed_samples_never_selects_board_when_configured_name_is_dashboard() {
+        let boards = vec![board("b1", "dashboard")];
+        let apps = seeded_apps();
+
+        let (boards_sel, apps_sel) = select_homarr_seed_samples(&boards, &apps, "dashboard");
+
+        assert!(boards_sel.is_empty());
+        assert!(apps_sel.is_empty());
+    }
+
+    #[test]
+    fn seed_samples_selects_nothing_when_configured_board_differs_in_case() {
+        // Homarr looks boards up case-insensitively, so a renamed "halos" is
+        // still the configured board and the device is not a fresh install.
+        let boards = vec![board("b1", "halos"), board("b2", "dashboard")];
+        let apps = seeded_apps();
+
+        let (boards_sel, apps_sel) = select_homarr_seed_samples(&boards, &apps, "Halos");
+
+        assert!(boards_sel.is_empty());
+        assert!(apps_sel.is_empty());
+    }
+
+    #[test]
+    fn seed_samples_skips_apps_with_other_hrefs() {
+        let boards = vec![];
+        let apps = vec![
+            selectable("u1", "Homarr Docs", Some("https://homarr.dev/docs/")),
+            selectable("u2", "Cockpit", Some("/cockpit/")),
+            selectable("u3", "No href", None),
+            selectable(
+                "u4",
+                "Docs variant",
+                Some("https://homarr.dev/docs/getting-started/"),
+            ),
+        ];
+
+        let (_, apps_sel) = select_homarr_seed_samples(&boards, &apps, "Halos");
+
+        assert!(apps_sel.is_empty());
+    }
+
+    #[test]
+    fn seed_samples_skips_boards_with_other_names() {
+        let boards = vec![board("b1", "Dashboard"), board("b2", "my-dashboard")];
+
+        let (boards_sel, _) = select_homarr_seed_samples(&boards, &[], "Halos");
+
+        assert!(boards_sel.is_empty());
     }
 
     // Tests for external-app ping handling
