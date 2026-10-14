@@ -73,6 +73,8 @@ struct Layout {
     #[serde(rename = "columnCount")]
     column_count: i32,
     breakpoint: i32,
+    #[serde(default)]
+    role: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,6 +245,10 @@ fn item_app_id(item: &serde_json::Value) -> Option<&str> {
 /// breakpoint: a match reuses the existing id (so Homarr treats it as an update
 /// and never deletes it), while an unmatched entry gets a placeholder id that
 /// Homarr replaces with a freshly generated one on insert.
+///
+/// Homarr v2 rejects any change to an existing layout's role and any new
+/// layout whose role is not `custom`, so a match echoes the existing role and
+/// an insert is always `custom`. Pre-v2 boards have no roles to echo.
 fn build_layout_submission(
     configured: &[crate::branding::LayoutEntry],
     existing: &[Layout],
@@ -250,17 +256,26 @@ fn build_layout_submission(
     configured
         .iter()
         .map(|entry| {
-            let id = existing
+            let matched = existing
                 .iter()
-                .find(|layout| layout.breakpoint == entry.breakpoint)
-                .map(|layout| layout.id.clone())
-                .unwrap_or_else(|| format!("new-{}", entry.breakpoint));
-            json!({
+                .find(|layout| layout.breakpoint == entry.breakpoint);
+            let (id, role) = match matched {
+                Some(layout) => (layout.id.clone(), layout.role.clone()),
+                None => (
+                    format!("new-{}", entry.breakpoint),
+                    Some("custom".to_string()),
+                ),
+            };
+            let mut layout = json!({
                 "id": id,
                 "name": entry.name,
                 "columnCount": entry.column_count,
                 "breakpoint": entry.breakpoint,
-            })
+            });
+            if let Some(role) = role {
+                layout["role"] = json!(role);
+            }
+            layout
         })
         .collect()
 }
@@ -1875,7 +1890,101 @@ mod tests {
             name: "Base".to_string(),
             column_count,
             breakpoint,
+            role: None,
         }
+    }
+
+    fn layout_with_role(id: &str, breakpoint: i32, column_count: i32, role: &str) -> Layout {
+        Layout {
+            role: Some(role.to_string()),
+            ..existing_layout(id, breakpoint, column_count)
+        }
+    }
+
+    fn halos_layouts() -> Vec<crate::branding::LayoutEntry> {
+        vec![
+            layout_entry("Mobile", 0, 4),
+            layout_entry("Tablet", 768, 6),
+            layout_entry("Desktop", 1200, 12),
+        ]
+    }
+
+    #[test]
+    fn build_layout_submission_fresh_v2_board_keeps_roles_and_adds_custom() {
+        // board.createBoard on v2 creates Mobile (0, mobile) and Base (768, base).
+        let existing = vec![
+            layout_with_role("id-mobile", 0, 3, "mobile"),
+            layout_with_role("id-base", 768, 10, "base"),
+        ];
+
+        let out = build_layout_submission(&halos_layouts(), &existing);
+
+        assert_eq!(out[0]["id"], "id-mobile");
+        assert_eq!(out[0]["role"], "mobile");
+        assert_eq!(out[1]["id"], "id-base");
+        assert_eq!(out[1]["role"], "base");
+        assert_eq!(out[2]["id"], "new-1200");
+        assert_eq!(out[2]["role"], "custom");
+    }
+
+    #[test]
+    fn build_layout_submission_upgraded_board_keeps_migrated_roles() {
+        // v2's upgrade migration made Desktop the base layout on adapter boards.
+        let existing = vec![
+            layout_with_role("id-mobile", 0, 4, "mobile"),
+            layout_with_role("id-tablet", 768, 6, "custom"),
+            layout_with_role("id-desktop", 1200, 12, "base"),
+        ];
+
+        let out = build_layout_submission(&halos_layouts(), &existing);
+
+        let roles: Vec<_> = out.iter().map(|l| l["role"].clone()).collect();
+        assert_eq!(roles, vec![json!("mobile"), json!("custom"), json!("base")]);
+    }
+
+    #[test]
+    fn build_layout_submission_omits_role_only_on_matched_pre_v2_layouts() {
+        // Pre-v2 Homarr has no layout roles to echo back; new layouts still
+        // carry "custom", which pre-v2's non-strict schema drops.
+        let existing = vec![existing_layout("id-mobile", 0, 4)];
+
+        let out = build_layout_submission(&halos_layouts(), &existing);
+
+        assert!(out[0].get("role").is_none());
+        assert_eq!(out[1]["role"], "custom");
+        assert_eq!(out[2]["role"], "custom");
+    }
+
+    #[test]
+    fn build_layout_submission_role_independent_of_configured_order() {
+        let mut configured = halos_layouts();
+        configured.reverse();
+        let existing = vec![
+            layout_with_role("id-base", 768, 10, "base"),
+            layout_with_role("id-mobile", 0, 3, "mobile"),
+        ];
+
+        let out = build_layout_submission(&configured, &existing);
+
+        assert_eq!(out[0]["breakpoint"], 1200);
+        assert_eq!(out[0]["role"], "custom");
+        assert_eq!(out[1]["role"], "base");
+        assert_eq!(out[2]["role"], "mobile");
+    }
+
+    #[test]
+    fn layout_deserializes_with_and_without_role() {
+        let v2: Layout = serde_json::from_value(json!({
+            "id": "a", "name": "Mobile", "columnCount": 3, "breakpoint": 0, "role": "mobile"
+        }))
+        .unwrap();
+        assert_eq!(v2.role.as_deref(), Some("mobile"));
+
+        let v1: Layout = serde_json::from_value(json!({
+            "id": "a", "name": "Base", "columnCount": 12, "breakpoint": 0
+        }))
+        .unwrap();
+        assert_eq!(v1.role, None);
     }
 
     #[test]
