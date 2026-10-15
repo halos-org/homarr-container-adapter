@@ -141,10 +141,7 @@ async fn run_sync(config: &Config) -> Result<()> {
     ensure_authenticated(&mut client, config, &mut state).await?;
 
     // Discover writable boards
-    let writable_boards = client.get_writable_boards().await.unwrap_or_else(|e| {
-        warn!("Failed to fetch writable boards: {}", e);
-        vec![]
-    });
+    let writable_boards = client.get_writable_boards().await?;
 
     if writable_boards.is_empty() {
         warn!("No writable boards found, skipping sync");
@@ -161,11 +158,9 @@ async fn run_sync(config: &Config) -> Result<()> {
             .join(", ")
     );
 
-    // Pre-fetch existing apps for efficient deduplication
-    let existing_apps = client.get_all_apps().await.unwrap_or_else(|e| {
-        warn!("Failed to fetch existing apps: {}", e);
-        vec![]
-    });
+    // Pre-fetch existing apps for deduplication; syncing against a list that
+    // failed to load would create a duplicate of every app.
+    let existing_apps = client.get_all_apps().await?;
 
     // Load registry apps
     info!("Loading apps from registry: {}", config.registry_dir);

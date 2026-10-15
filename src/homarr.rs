@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::branding::BrandingConfig;
 use crate::error::{AdapterError, Result};
@@ -423,18 +424,33 @@ fn transform_icon_url(icon_path: &str) -> String {
     DEFAULT_ICON.to_string()
 }
 
+/// Bounds every Homarr request, so a Homarr that accepts connections but never
+/// answers fails the sync, which is retried, instead of stalling the daemon.
+const HOMARR_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const HOMARR_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl HomarrClient {
     /// Create a new Homarr client
     ///
     /// # Arguments
     /// * `base_url` - The Homarr API base URL (e.g., "http://localhost:80")
     pub fn new(base_url: &str) -> Result<Self> {
+        Self::with_timeouts(base_url, HOMARR_REQUEST_TIMEOUT, HOMARR_CONNECT_TIMEOUT)
+    }
+
+    fn with_timeouts(
+        base_url: &str,
+        request_timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Result<Self> {
         let jar = Arc::new(Jar::default());
         let client = Client::builder()
             .cookie_store(true)
             .cookie_provider(jar)
             // Accept self-signed certificates (required for local SSL configurations)
             .danger_accept_invalid_certs(true)
+            .timeout(request_timeout)
+            .connect_timeout(connect_timeout)
             .build()?;
 
         Ok(Self {
@@ -1657,6 +1673,34 @@ mod tests {
     fn test_client_new_preserves_path() {
         let client = HomarrClient::new("http://localhost:7575/homarr").unwrap();
         assert_eq!(client.base_url, "http://localhost:7575/homarr");
+    }
+
+    #[tokio::test]
+    async fn test_client_gives_up_on_unresponsive_homarr() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let request_timeout = Duration::from_millis(200);
+        let client = HomarrClient::with_timeouts(
+            &format!("http://{}", addr),
+            request_timeout,
+            HOMARR_CONNECT_TIMEOUT,
+        )
+        .unwrap();
+        let outcome = tokio::time::timeout(request_timeout * 10, client.get_all_boards()).await;
+
+        assert!(
+            matches!(
+                &outcome,
+                Ok(Err(AdapterError::Http(e))) if e.is_timeout() && !e.is_connect()
+            ),
+            "expected the request timeout on an established connection, got {:?}",
+            outcome.map(|r| r.map(|_| ()))
+        );
     }
 
     // find_app_by_url tests
