@@ -14,10 +14,10 @@ case "$1" in
             deb-systemd-helper enable 'homarr-container-adapter.service' >/dev/null || true
         fi
 
-        # Start the service if systemd is running
+        # Restart so an upgrade runs the new binary (starts it on first install)
         if [ -d /run/systemd/system ]; then
             systemctl --system daemon-reload >/dev/null || true
-            systemctl start homarr-container-adapter.service >/dev/null || true
+            systemctl restart homarr-container-adapter.service >/dev/null || true
         fi
         ;;
 esac

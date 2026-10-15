@@ -73,6 +73,8 @@ struct Layout {
     #[serde(rename = "columnCount")]
     column_count: i32,
     breakpoint: i32,
+    #[serde(default)]
+    role: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,11 +240,96 @@ fn item_app_id(item: &serde_json::Value) -> Option<&str> {
         .and_then(|a| a.as_str())
 }
 
+/// Board created by Homarr v2's startup seeder (`packages/db/migrations/seed.ts`)
+/// when the database holds no board.
+const HOMARR_SEED_BOARD_NAME: &str = "dashboard";
+
+/// Hrefs of the sample apps Homarr v2.5.2's seeder creates when the database
+/// holds no app (`defaultBookmarkApps`), as rendered into the database.
+const HOMARR_SEED_APP_HREFS: [&str; 4] = [
+    "https://homarr.dev/docs/getting-started",
+    "https://github.com/homarr-labs/homarr",
+    "https://homarr.dev/docs/community/translations",
+    "https://opencollective.com/homarr",
+];
+
+/// Select the boards and apps Homarr's seeder added on a fresh install.
+///
+/// Selects nothing once the configured board exists: from then on any board or
+/// app matching the samples may be the user's own.
+fn select_homarr_seed_samples<'a>(
+    boards: &'a [BoardWithPermission],
+    apps: &'a [SelectableApp],
+    configured_board: &str,
+) -> (Vec<&'a BoardWithPermission>, Vec<&'a SelectableApp>) {
+    // Case-insensitive like Homarr's board lookup, which setup_default_board uses
+    if boards
+        .iter()
+        .any(|b| b.name.eq_ignore_ascii_case(configured_board))
+    {
+        return (vec![], vec![]);
+    }
+    let seed_boards = boards
+        .iter()
+        .filter(|b| b.name == HOMARR_SEED_BOARD_NAME)
+        .collect();
+    let seed_apps = apps
+        .iter()
+        .filter(|a| {
+            a.href
+                .as_deref()
+                .is_some_and(|href| HOMARR_SEED_APP_HREFS.contains(&href))
+        })
+        .collect();
+    (seed_boards, seed_apps)
+}
+
+/// Prefix of board item ids the adapter creates, distinguishing its cards from
+/// ones a user placed by hand.
+const REGISTRY_ITEM_PREFIX: &str = "registry-";
+
+/// Options for a new app board item. External apps have no ping URL, and
+/// Homarr v2 would otherwise ping the (possibly path-only) href, fail to parse
+/// it and show a red status dot.
+fn app_item_options(app_id: &str, external: bool) -> serde_json::Value {
+    let mut options = json!({ "appId": app_id });
+    if external {
+        options["pingEnabled"] = json!(false);
+    }
+    options
+}
+
+/// Set `pingEnabled: false` on adapter-created items for `app_id` that lack it,
+/// returning how many items changed. Items placed by a user are left alone.
+fn disable_ping_on_adapter_items(items: &mut [serde_json::Value], app_id: &str) -> usize {
+    let mut changed = 0;
+    for item in items.iter_mut() {
+        let adapter_created = item
+            .get("id")
+            .and_then(|id| id.as_str())
+            .is_some_and(|id| id.starts_with(REGISTRY_ITEM_PREFIX));
+        if !adapter_created || item_app_id(item) != Some(app_id) {
+            continue;
+        }
+        if let Some(options) = item.get_mut("options").and_then(|o| o.as_object_mut()) {
+            if options.get("pingEnabled") != Some(&json!(false)) {
+                options.insert("pingEnabled".to_string(), json!(false));
+                changed += 1;
+            }
+        }
+    }
+    changed
+}
+
 /// Build the `board.saveLayouts` submission from the configured layouts and the
 /// board's existing ones. Each configured layout is keyed to an existing one by
 /// breakpoint: a match reuses the existing id (so Homarr treats it as an update
 /// and never deletes it), while an unmatched entry gets a placeholder id that
 /// Homarr replaces with a freshly generated one on insert.
+///
+/// Homarr v2 rejects any change to an existing layout's role and any new
+/// layout whose role is not `custom`, so a match echoes the existing role and
+/// an insert is always `custom`. Pre-v2 boards have no roles to echo.
 fn build_layout_submission(
     configured: &[crate::branding::LayoutEntry],
     existing: &[Layout],
@@ -250,17 +337,26 @@ fn build_layout_submission(
     configured
         .iter()
         .map(|entry| {
-            let id = existing
+            let matched = existing
                 .iter()
-                .find(|layout| layout.breakpoint == entry.breakpoint)
-                .map(|layout| layout.id.clone())
-                .unwrap_or_else(|| format!("new-{}", entry.breakpoint));
-            json!({
+                .find(|layout| layout.breakpoint == entry.breakpoint);
+            let (id, role) = match matched {
+                Some(layout) => (layout.id.clone(), layout.role.clone()),
+                None => (
+                    format!("new-{}", entry.breakpoint),
+                    Some("custom".to_string()),
+                ),
+            };
+            let mut layout = json!({
                 "id": id,
                 "name": entry.name,
                 "columnCount": entry.column_count,
                 "breakpoint": entry.breakpoint,
-            })
+            });
+            if let Some(role) = role {
+                layout["role"] = json!(role);
+            }
+            layout
         })
         .collect()
 }
@@ -880,6 +976,58 @@ impl HomarrClient {
         Ok(boards.into_iter().filter(|b| b.is_writable()).collect())
     }
 
+    /// Delete the sample board and apps Homarr's seeder adds to a fresh
+    /// install, so HaLOS apps are not synced onto a stray board.
+    ///
+    /// The seeded board is also the everyone group's home board, which
+    /// outranks the server-wide home board; deleting it clears that link.
+    /// Individual deletion failures are logged and skipped.
+    pub async fn remove_homarr_seed_samples(&self, configured_board: &str) -> Result<()> {
+        let boards = self.get_all_boards().await?;
+        let apps = self.get_all_apps().await?;
+        let (seed_boards, seed_apps) = select_homarr_seed_samples(&boards, &apps, configured_board);
+
+        for board in seed_boards {
+            match self.delete_board(&board.id).await {
+                Ok(()) => tracing::info!("Deleted Homarr sample board '{}'", board.name),
+                Err(e) => tracing::warn!(
+                    "Failed to delete Homarr sample board '{}': {}",
+                    board.name,
+                    e
+                ),
+            }
+        }
+        // The sample apps' items lived on the seeded board deleted above, so
+        // the bare delete leaves no orphan items to sweep.
+        for app in seed_apps {
+            match self.delete_app(&app.id).await {
+                Ok(()) => tracing::info!("Deleted Homarr sample app '{}'", app.name),
+                Err(e) => {
+                    tracing::warn!("Failed to delete Homarr sample app '{}': {}", app.name, e)
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_board(&self, board_id: &str) -> Result<()> {
+        let url = format!("{}/api/trpc/board.deleteBoard", self.base_url);
+        let payload = json!({ "json": { "id": board_id } });
+
+        let response = self.post_json(&url, &payload).await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(AdapterError::HomarrApi(format!(
+                "board.deleteBoard('{}') returned {}: {}",
+                board_id, status, text
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Find an existing app by URL in a pre-fetched list.
     ///
     /// Two-tier matching:
@@ -1086,11 +1234,11 @@ impl HomarrClient {
     /// Delete an app from Homarr's global registry
     ///
     /// Note: this is the bare delete and does NOT remove board items pointing
-    /// at the deleted appId. Production callers should use
-    /// [`delete_app_and_orphan_items`](Self::delete_app_and_orphan_items) so
-    /// orphan items don't render as "No app" placeholders. This bare variant
-    /// is kept available for tests and any future caller that explicitly
-    /// wants global-only deletion.
+    /// at the deleted appId. Callers that may leave such items behind should
+    /// use [`delete_app_and_orphan_items`](Self::delete_app_and_orphan_items)
+    /// so they don't render as "No app" placeholders. The bare delete is right
+    /// when the board holding the app's items is already gone, as in
+    /// [`remove_homarr_seed_samples`](Self::remove_homarr_seed_samples).
     pub async fn delete_app(&self, app_id: &str) -> Result<()> {
         let url = format!("{}/api/trpc/app.delete", self.base_url);
         let payload = json!({
@@ -1214,10 +1362,40 @@ impl HomarrClient {
         app: &AppDefinition,
         board_name: &str,
     ) -> Result<()> {
-        let board_items = self.get_board_items(board_name).await.unwrap_or_default();
+        // An empty fallback would make the save below drop every other card
+        let mut board_items = self.get_board_items(board_name).await?;
 
         // Check if this app is already on the board
         if board_has_app(&board_items, app_id) {
+            // Cards placed before external apps got pingEnabled=false need it
+            // added, or Homarr v2 keeps showing a failing ping indicator.
+            if app.is_external() && disable_ping_on_adapter_items(&mut board_items, app_id) > 0 {
+                let board = self.get_board_by_name(board_name).await?;
+                let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
+                let payload = json!({
+                    "json": {
+                        "id": board.id,
+                        "sections": board.sections,
+                        "items": board_items,
+                        "integrations": []
+                    }
+                });
+                let response = self.post_json(&url, &payload).await?;
+                if !response.status().is_success() {
+                    let text = response.text().await.unwrap_or_default();
+                    return Err(AdapterError::HomarrApi(format!(
+                        "Failed to save board '{}' while disabling ping for '{}': {}",
+                        board_name, app.name, text
+                    )));
+                }
+                tracing::info!(
+                    "Disabled ping indicator for external app '{}' on board '{}'",
+                    app.name,
+                    board_name
+                );
+                return Ok(());
+            }
+
             tracing::info!(
                 "Registry app '{}' already on board '{}', skipping",
                 app.name,
@@ -1241,9 +1419,9 @@ impl HomarrClient {
         // Generate a unique ID for this board item
         // Use container name if available, otherwise use a hash of the URL
         let item_id = if let Some(container) = app.container_name() {
-            format!("registry-{}", container)
+            format!("{}{}", REGISTRY_ITEM_PREFIX, container)
         } else {
-            format!("registry-{:x}", string_hash(&app.url))
+            format!("{}{:x}", REGISTRY_ITEM_PREFIX, string_hash(&app.url))
         };
 
         let url = format!("{}/api/trpc/board.saveBoard", self.base_url);
@@ -1252,9 +1430,7 @@ impl HomarrClient {
         items.push(json!({
             "id": item_id,
             "kind": "app",
-            "options": {
-                "appId": app_id
-            },
+            "options": app_item_options(app_id, app.is_external()),
             "layouts": item_layouts,
             "integrationIds": [],
             "advancedOptions": {
@@ -1875,7 +2051,101 @@ mod tests {
             name: "Base".to_string(),
             column_count,
             breakpoint,
+            role: None,
         }
+    }
+
+    fn layout_with_role(id: &str, breakpoint: i32, column_count: i32, role: &str) -> Layout {
+        Layout {
+            role: Some(role.to_string()),
+            ..existing_layout(id, breakpoint, column_count)
+        }
+    }
+
+    fn halos_layouts() -> Vec<crate::branding::LayoutEntry> {
+        vec![
+            layout_entry("Mobile", 0, 4),
+            layout_entry("Tablet", 768, 6),
+            layout_entry("Desktop", 1200, 12),
+        ]
+    }
+
+    #[test]
+    fn build_layout_submission_fresh_v2_board_keeps_roles_and_adds_custom() {
+        // board.createBoard on v2 creates Mobile (0, mobile) and Base (768, base).
+        let existing = vec![
+            layout_with_role("id-mobile", 0, 3, "mobile"),
+            layout_with_role("id-base", 768, 10, "base"),
+        ];
+
+        let out = build_layout_submission(&halos_layouts(), &existing);
+
+        assert_eq!(out[0]["id"], "id-mobile");
+        assert_eq!(out[0]["role"], "mobile");
+        assert_eq!(out[1]["id"], "id-base");
+        assert_eq!(out[1]["role"], "base");
+        assert_eq!(out[2]["id"], "new-1200");
+        assert_eq!(out[2]["role"], "custom");
+    }
+
+    #[test]
+    fn build_layout_submission_upgraded_board_keeps_migrated_roles() {
+        // v2's upgrade migration made Desktop the base layout on adapter boards.
+        let existing = vec![
+            layout_with_role("id-mobile", 0, 4, "mobile"),
+            layout_with_role("id-tablet", 768, 6, "custom"),
+            layout_with_role("id-desktop", 1200, 12, "base"),
+        ];
+
+        let out = build_layout_submission(&halos_layouts(), &existing);
+
+        let roles: Vec<_> = out.iter().map(|l| l["role"].clone()).collect();
+        assert_eq!(roles, vec![json!("mobile"), json!("custom"), json!("base")]);
+    }
+
+    #[test]
+    fn build_layout_submission_omits_role_only_on_matched_pre_v2_layouts() {
+        // Pre-v2 Homarr has no layout roles to echo back; new layouts still
+        // carry "custom", which pre-v2's non-strict schema drops.
+        let existing = vec![existing_layout("id-mobile", 0, 4)];
+
+        let out = build_layout_submission(&halos_layouts(), &existing);
+
+        assert!(out[0].get("role").is_none());
+        assert_eq!(out[1]["role"], "custom");
+        assert_eq!(out[2]["role"], "custom");
+    }
+
+    #[test]
+    fn build_layout_submission_role_independent_of_configured_order() {
+        let mut configured = halos_layouts();
+        configured.reverse();
+        let existing = vec![
+            layout_with_role("id-base", 768, 10, "base"),
+            layout_with_role("id-mobile", 0, 3, "mobile"),
+        ];
+
+        let out = build_layout_submission(&configured, &existing);
+
+        assert_eq!(out[0]["breakpoint"], 1200);
+        assert_eq!(out[0]["role"], "custom");
+        assert_eq!(out[1]["role"], "base");
+        assert_eq!(out[2]["role"], "mobile");
+    }
+
+    #[test]
+    fn layout_deserializes_with_and_without_role() {
+        let v2: Layout = serde_json::from_value(json!({
+            "id": "a", "name": "Mobile", "columnCount": 3, "breakpoint": 0, "role": "mobile"
+        }))
+        .unwrap();
+        assert_eq!(v2.role.as_deref(), Some("mobile"));
+
+        let v1: Layout = serde_json::from_value(json!({
+            "id": "a", "name": "Base", "columnCount": 12, "breakpoint": 0
+        }))
+        .unwrap();
+        assert_eq!(v1.role, None);
     }
 
     #[test]
@@ -2045,6 +2315,201 @@ mod tests {
 
         // Should not crash and should return false for all
         assert!(!board_has_app(&items, "any-app-id"));
+    }
+
+    // Tests for Homarr seed sample selection
+
+    fn board(id: &str, name: &str) -> BoardWithPermission {
+        BoardWithPermission {
+            id: id.to_string(),
+            name: name.to_string(),
+            is_public: false,
+            user_permissions: vec![],
+            group_permissions: vec![],
+        }
+    }
+
+    fn seeded_apps() -> Vec<SelectableApp> {
+        vec![
+            selectable(
+                "s1",
+                "Homarr Docs",
+                Some("https://homarr.dev/docs/getting-started"),
+            ),
+            selectable(
+                "s2",
+                "Homarr GitHub",
+                Some("https://github.com/homarr-labs/homarr"),
+            ),
+            selectable(
+                "s3",
+                "Help Translate",
+                Some("https://homarr.dev/docs/community/translations"),
+            ),
+            selectable(
+                "s4",
+                "Support Homarr",
+                Some("https://opencollective.com/homarr"),
+            ),
+        ]
+    }
+
+    fn ids<T>(items: &[&T], id: impl Fn(&T) -> &str) -> Vec<String> {
+        items.iter().map(|i| id(i).to_string()).collect()
+    }
+
+    #[test]
+    fn seed_samples_selects_seeded_board_and_apps_on_fresh_install() {
+        let boards = vec![board("b1", "dashboard")];
+        let apps = seeded_apps();
+
+        let (boards_sel, apps_sel) = select_homarr_seed_samples(&boards, &apps, "Halos");
+
+        assert_eq!(ids(&boards_sel, |b| &b.id), vec!["b1"]);
+        assert_eq!(ids(&apps_sel, |a| &a.id), vec!["s1", "s2", "s3", "s4"]);
+    }
+
+    #[test]
+    fn seed_samples_selects_nothing_when_configured_board_exists() {
+        let boards = vec![board("b1", "dashboard"), board("b2", "Halos")];
+        let apps = seeded_apps();
+
+        let (boards_sel, apps_sel) = select_homarr_seed_samples(&boards, &apps, "Halos");
+
+        assert!(boards_sel.is_empty());
+        assert!(apps_sel.is_empty());
+    }
+
+    #[test]
+    fn seed_samples_never_selects_board_when_configured_name_is_dashboard() {
+        let boards = vec![board("b1", "dashboard")];
+        let apps = seeded_apps();
+
+        let (boards_sel, apps_sel) = select_homarr_seed_samples(&boards, &apps, "dashboard");
+
+        assert!(boards_sel.is_empty());
+        assert!(apps_sel.is_empty());
+    }
+
+    #[test]
+    fn seed_samples_selects_nothing_when_configured_board_differs_in_case() {
+        // Homarr looks boards up case-insensitively, so a renamed "halos" is
+        // still the configured board and the device is not a fresh install.
+        let boards = vec![board("b1", "halos"), board("b2", "dashboard")];
+        let apps = seeded_apps();
+
+        let (boards_sel, apps_sel) = select_homarr_seed_samples(&boards, &apps, "Halos");
+
+        assert!(boards_sel.is_empty());
+        assert!(apps_sel.is_empty());
+    }
+
+    #[test]
+    fn seed_samples_skips_apps_with_other_hrefs() {
+        let boards = vec![];
+        let apps = vec![
+            selectable("u1", "Homarr Docs", Some("https://homarr.dev/docs/")),
+            selectable("u2", "Cockpit", Some("/cockpit/")),
+            selectable("u3", "No href", None),
+            selectable(
+                "u4",
+                "Docs variant",
+                Some("https://homarr.dev/docs/getting-started/"),
+            ),
+        ];
+
+        let (_, apps_sel) = select_homarr_seed_samples(&boards, &apps, "Halos");
+
+        assert!(apps_sel.is_empty());
+    }
+
+    #[test]
+    fn seed_samples_skips_boards_with_other_names() {
+        let boards = vec![board("b1", "Dashboard"), board("b2", "my-dashboard")];
+
+        let (boards_sel, _) = select_homarr_seed_samples(&boards, &[], "Halos");
+
+        assert!(boards_sel.is_empty());
+    }
+
+    // Tests for external-app ping handling
+
+    #[test]
+    fn app_item_options_disable_ping_for_external_app() {
+        assert_eq!(
+            app_item_options("app-1", true),
+            json!({"appId": "app-1", "pingEnabled": false})
+        );
+    }
+
+    #[test]
+    fn app_item_options_leave_ping_unset_for_regular_app() {
+        let options = app_item_options("app-1", false);
+        assert_eq!(options, json!({"appId": "app-1"}));
+        assert!(options.get("pingEnabled").is_none());
+    }
+
+    #[test]
+    fn disable_ping_patches_adapter_item_and_leaves_others() {
+        let mut items = vec![
+            item_for_app("registry-abc", "ext-app"),
+            item_for_app("registry-cockpit", "other-app"),
+        ];
+        let untouched = items[1].clone();
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 1);
+
+        assert_eq!(items[0]["options"]["pingEnabled"], json!(false));
+        assert_eq!(items[0]["options"]["appId"], "ext-app");
+        assert_eq!(items[1], untouched);
+    }
+
+    #[test]
+    fn disable_ping_is_noop_when_already_disabled() {
+        let mut items = vec![json!({
+            "id": "registry-abc",
+            "kind": "app",
+            "options": {"appId": "ext-app", "pingEnabled": false}
+        })];
+        let before = items.clone();
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 0);
+        assert_eq!(items, before);
+    }
+
+    #[test]
+    fn disable_ping_overrides_enabled_ping_on_adapter_item() {
+        let mut items = vec![json!({
+            "id": "registry-abc",
+            "kind": "app",
+            "options": {"appId": "ext-app", "pingEnabled": true}
+        })];
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 1);
+        assert_eq!(items[0]["options"]["pingEnabled"], json!(false));
+    }
+
+    #[test]
+    fn disable_ping_skips_user_created_item_for_same_app() {
+        // A card the user placed themselves keeps whatever ping setting they chose.
+        let mut items = vec![item_for_app("user-made-item", "ext-app")];
+        let before = items.clone();
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 0);
+        assert_eq!(items, before);
+    }
+
+    #[test]
+    fn disable_ping_handles_malformed_items() {
+        let mut items = vec![
+            json!({"id": "registry-no-options"}),
+            json!({"id": "registry-null-options", "options": null}),
+            json!({"kind": "app", "options": {"appId": "ext-app"}}),
+        ];
+        let before = items.clone();
+
+        assert_eq!(disable_ping_on_adapter_items(&mut items, "ext-app"), 0);
+        assert_eq!(items, before);
     }
 
     // Tests for partition_items_by_app_id (cascade-delete helper)

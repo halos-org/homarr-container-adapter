@@ -469,6 +469,15 @@ async fn run_setup(config: &Config) -> Result<()> {
         client.complete_onboarding(&branding).await?;
     }
 
+    // Homarr v2 seeds a sample board and apps into an empty database. Clutter
+    // left by a failed cleanup is preferable to aborting first-boot setup.
+    if let Err(e) = client
+        .remove_homarr_seed_samples(&branding.board.name)
+        .await
+    {
+        warn!("Failed to remove Homarr sample board and apps: {}", e);
+    }
+
     // Set up default board
     info!("Setting up default board");
     client.setup_default_board(&branding).await?;
